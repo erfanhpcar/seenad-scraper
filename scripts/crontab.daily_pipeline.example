@@ -1,0 +1,4 @@
+# SeenAd daily mapping pipeline (runs at 02:30 every night)
+# Adjust paths if your project path differs.
+30 2 * * * cd /var/www/seenad && /usr/bin/docker exec seenad_backend python scripts/run_daily_pipeline.py --provider divar >> /var/www/seenad/logs/cron_daily_pipeline.log 2>&1
+

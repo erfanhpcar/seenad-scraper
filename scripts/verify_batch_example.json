@@ -1,0 +1,9 @@
+[
+  { "source_string": "کوییک gxr تیپ l", "action": "verify" },
+  { "source_string": "کوییک gx تیپ l", "action": "verify" },
+  { "source_string": "کوییک rs", "action": "verify" },
+  { "source_string": "لاماری ایما", "action": "verify" },
+  { "source_string": "تیبا 2 هاچبک ex", "action": "verify" },
+  { "source_string": "تیبا صندوق دار ex", "action": "verify" },
+  { "source_string": "پیکان سواری", "action": "fix", "target_reference_id": 317, "is_verified": true }
+]

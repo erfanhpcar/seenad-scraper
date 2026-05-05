@@ -1,0 +1,161 @@
+x-runflare-hosts: &runflare_hosts
+  - "mirror-linux.runflare.com:185.126.10.222"
+  - "mirror-pypi.runflare.com:185.126.10.222"
+
+services:
+  redis:
+    image: docker.arvancloud.ir/redis:7-alpine
+    container_name: seenad_redis
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  db:
+    image: docker.arvancloud.ir/postgres:16
+    container_name: seenad_db
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./postgres/migrations:/var/www/seenad/postgres/migrations:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U seenad_db -d seenad_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      extra_hosts: *runflare_hosts
+    container_name: seenad_backend
+    working_dir: /app
+    extra_hosts:
+      - "mirror-linux.runflare.com:185.126.10.222"
+      - "mirror-pypi.runflare.com:185.126.10.222"
+      - "bama.ir:185.166.104.4"
+      - "www.bama.ir:185.166.104.4"
+      - "karnameh.com:185.166.104.4"
+      - "www.karnameh.com:185.166.104.4"
+    dns:
+      - 8.8.8.8
+      - 4.2.2.4
+    volumes:
+      - ./:/app
+    env_file:
+      - .env
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      PIP_INDEX_URL: https://mirror-pypi.runflare.com/simple
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      extra_hosts: *runflare_hosts
+    container_name: seenad_worker
+    working_dir: /app
+    extra_hosts:
+      - "mirror-linux.runflare.com:185.126.10.222"
+      - "mirror-pypi.runflare.com:185.126.10.222"
+      - "bama.ir:185.166.104.4"
+      - "www.bama.ir:185.166.104.4"
+      - "karnameh.com:185.166.104.4"
+      - "www.karnameh.com:185.166.104.4"
+    dns:
+      - 8.8.8.8
+      - 4.2.2.4
+    volumes:
+      - ./:/app
+    env_file:
+      - .env
+    command: celery -A app.celery_app:celery_app worker --concurrency=2 --loglevel=info
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      PYTHONPATH: /app
+      PIP_INDEX_URL: https://mirror-pypi.runflare.com/simple
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      extra_hosts: *runflare_hosts
+    container_name: seenad_beat
+    working_dir: /app
+    extra_hosts:
+      - "mirror-linux.runflare.com:185.126.10.222"
+      - "mirror-pypi.runflare.com:185.126.10.222"
+      - "bama.ir:185.166.104.4"
+      - "www.bama.ir:185.166.104.4"
+    dns:
+      - 8.8.8.8
+      - 4.2.2.4
+    volumes:
+      - ./:/app
+      - celerybeat_schedule:/tmp/celerybeat
+    env_file:
+      - .env
+    command:
+      [
+        "celery",
+        "-A",
+        "app.celery_app:celery_app",
+        "beat",
+        "--loglevel=info",
+        "--schedule=/tmp/celerybeat/celerybeat-schedule",
+      ]
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      PYTHONPATH: /app
+      BAMA_INGESTION_INTERVAL_SECONDS: "30"
+      BAMA_INGESTION_BEAT_ENABLED: "0"
+      BAMA_DISCOVERY_INTERVAL_SECONDS: "300"
+      BAMA_DISCOVERY_BEAT_ENABLED: "0"
+      PIP_INDEX_URL: https://mirror-pypi.runflare.com/simple
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  celerybeat_schedule:
