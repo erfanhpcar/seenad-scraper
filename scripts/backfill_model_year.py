@@ -20,6 +20,7 @@ TITLE_YEAR_RE = re.compile(r"(?<!\d)(1[34]\d{2}|19\d{2}|20\d{2})(?!\d)")
 URL_END_YEAR_RE = re.compile(
     r"(?:[-_/]|%2[fF]|%2[dD])(1[34]\d{2}|19\d{2}|20\d{2})(?:[/#?]|$)"
 )
+URL_ANY_YEAR_RE = re.compile(r"(?<!\d)(1[34]\d{2}|19\d{2}|20\d{2})(?!\d)")
 FA_AR_TO_EN = str.maketrans(
     "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩",
     "01234567890123456789",
@@ -39,16 +40,22 @@ def _normalize_to_jalali_year(year: int | None) -> int | None:
     # Upstream feeds may expose Gregorian year; convert to Jalali for our model_year convention.
     if year > 1800:
         year = year - 621
-    if 1300 <= year <= 1499:
+    if 1350 <= year <= 1405:
         return year
     return None
 
 
 def _extract_year_from_url_tail(url_text: str) -> int | None:
     match = URL_END_YEAR_RE.search(url_text)
-    if not match:
-        return None
-    return _normalize_to_jalali_year(int(match.group(1)))
+    if match:
+        year = _normalize_to_jalali_year(int(match.group(1)))
+        if year is not None:
+            return year
+    for any_match in URL_ANY_YEAR_RE.finditer(url_text):
+        year = _normalize_to_jalali_year(int(any_match.group(1)))
+        if year is not None:
+            return year
+    return None
 
 
 def _extract_year_from_title_text(title_text: str) -> int | None:

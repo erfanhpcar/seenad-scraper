@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -32,6 +32,8 @@ _FA_AR_TO_EN_DIGITS = str.maketrans(
 )
 _YEAR_FROM_URL_END_RE = re.compile(r"(?:[-_/]|%2[fF]|%2[dD])(1[34]\d{2}|19\d{2}|20\d{2})(?:[/#?]|$)")
 _YEAR_FROM_TEXT_RE = re.compile(r"(?<!\d)(1[34]\d{2}|19\d{2}|20\d{2})(?!\d)")
+_MODEL_YEAR_MIN = 1350
+_MODEL_YEAR_MAX = 1405
 
 _REACTIVE_WRAPPERS = frozenset({"Reactive", "ShallowReactive", "Ref"})
 _TIMESTAMP_KEYS_EXACT = frozenset(
@@ -67,9 +69,10 @@ def _normalize_digit_chars(text: str) -> str:
 def _normalize_model_year(year: int | None) -> int | None:
     if year is None:
         return None
+    year = int(year)
     if year > 1800:
         year = year - 621
-    if 1300 <= year <= 1499:
+    if _MODEL_YEAR_MIN <= year <= _MODEL_YEAR_MAX:
         return year
     return None
 
@@ -78,20 +81,30 @@ def _extract_model_year_candidates_from_text(text: str | None) -> int | None:
     if not text:
         return None
     normalized = _normalize_digit_chars(text)
-    m = _YEAR_FROM_TEXT_RE.search(normalized)
-    if not m:
-        return None
-    return _normalize_model_year(int(m.group(1)))
+    for match in _YEAR_FROM_TEXT_RE.finditer(normalized):
+        year = _normalize_model_year(int(match.group(1)))
+        if year is not None:
+            return year
+    return None
 
 
 def _extract_model_year_from_url_tail(url_text: str | None) -> int | None:
     if not url_text:
         return None
     normalized = _normalize_digit_chars(url_text)
-    m = _YEAR_FROM_URL_END_RE.search(normalized)
-    if not m:
-        return None
-    return _normalize_model_year(int(m.group(1)))
+    decoded = unquote(normalized)
+    m = _YEAR_FROM_URL_END_RE.search(decoded)
+    if m:
+        year = _normalize_model_year(int(m.group(1)))
+        if year is not None:
+            return year
+
+    # Newer URL slugs may place the year in the middle instead of URL tail.
+    for match in _YEAR_FROM_TEXT_RE.finditer(decoded):
+        year = _normalize_model_year(int(match.group(1)))
+        if year is not None:
+            return year
+    return None
 
 
 def _looks_like_persian_relative_time(text: str) -> bool:
@@ -1282,14 +1295,60 @@ def _merge_nuxt_regex_into_extract(
     brand = nf["brand"] if nf and nf["brand"] else base.brand
     model = nf["model"] if nf and nf["model"] else base.model
     trim = nf["trim"] if nf and nf["trim"] else base.trim
-    year = nf["year"] if nf and nf["year"] is not None else base.year
-    year = _normalize_model_year(year)
+    year = None
+    year_sources: list[str] = []
+
+    if nf and nf["year"] is not None:
+        candidate = _normalize_model_year(nf["year"])
+        if candidate is not None:
+            year = candidate
+            year_sources.append("nuxt.vehicle.year")
+
+    if year is None and base.year is not None:
+        candidate = _normalize_model_year(base.year)
+        if candidate is not None:
+            year = candidate
+            year_sources.append("base.year")
+
     if year is None:
-        year = _extract_model_year_from_url_tail(base.listing_url)
+        candidate = _extract_model_year_from_url_tail(base.listing_url)
+        if candidate is not None:
+            year = candidate
+            year_sources.append("url")
+
     if year is None:
-        year = _extract_model_year_candidates_from_text(base.model)
+        candidate = _extract_model_year_candidates_from_text(base.model)
+        if candidate is not None:
+            year = candidate
+            year_sources.append("model")
+
     if year is None:
-        year = _extract_model_year_candidates_from_text(base.trim)
+        candidate = _extract_model_year_candidates_from_text(base.trim)
+        if candidate is not None:
+            year = candidate
+            year_sources.append("trim")
+
+    if year is None:
+        candidate = _extract_model_year_candidates_from_text(base.description)
+        if candidate is not None:
+            year = candidate
+            year_sources.append("description")
+
+    if year is None:
+        LOGGER.warning(
+            "bama_detail_parser model_year unresolved url=%s model=%r trim=%r description_head=%r",
+            base.listing_url,
+            base.model,
+            base.trim,
+            (base.description or "")[:180],
+        )
+    elif year_sources:
+        LOGGER.info(
+            "bama_detail_parser model_year resolved=%s source=%s url=%s",
+            year,
+            ",".join(year_sources),
+            base.listing_url,
+        )
     mileage = nf["mileage"] if nf and nf["mileage"] is not None else base.mileage
     color = nf["color"] if nf and nf["color"] else base.color
     transmission = nf["gearbox_text"] if nf and nf["gearbox_text"] else base.transmission
