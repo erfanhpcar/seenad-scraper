@@ -353,6 +353,7 @@ def _upsert_bama_scraped_listing(db: Session, extract: BamaDetailExtract, car_re
         record.city = _truncate_db_field(extract.city, 100)
         record.brand_name = _truncate_db_field(extract.brand, 100)
         record.model_name = _truncate_db_field(extract.model, 120)
+        record.model_year = extract.year
         record.trim_name = _truncate_db_field(extract.trim, 120)
         record.car_reference_id = car_reference_id
         record.created_at_source = extract.created_at_source
@@ -368,6 +369,7 @@ def _upsert_bama_scraped_listing(db: Session, extract: BamaDetailExtract, car_re
         city=_truncate_db_field(extract.city, 100),
         brand_name=_truncate_db_field(extract.brand, 100),
         model_name=_truncate_db_field(extract.model, 120),
+        model_year=extract.year,
         trim_name=_truncate_db_field(extract.trim, 120),
         car_reference_id=car_reference_id,
         created_at_source=extract.created_at_source,
@@ -395,6 +397,7 @@ def _upsert_hm_scraped_listing(db: Session, extract: HMDetailExtract, car_refere
         record.city = _truncate_db_field(extract.city, 100)
         record.brand_name = _truncate_db_field(extract.brand, 100)
         record.model_name = _truncate_db_field(extract.model, 120)
+        record.model_year = extract.year
         record.trim_name = _truncate_db_field(extract.trim, 120)
         record.car_reference_id = car_reference_id
         record.created_at_source = extract.created_at_source
@@ -410,6 +413,7 @@ def _upsert_hm_scraped_listing(db: Session, extract: HMDetailExtract, car_refere
         city=_truncate_db_field(extract.city, 100),
         brand_name=_truncate_db_field(extract.brand, 100),
         model_name=_truncate_db_field(extract.model, 120),
+        model_year=extract.year,
         trim_name=_truncate_db_field(extract.trim, 120),
         car_reference_id=car_reference_id,
         created_at_source=extract.created_at_source,
@@ -437,6 +441,7 @@ def _upsert_kn_scraped_listing(db: Session, extract: KNDetailExtract, car_refere
         record.city = _truncate_db_field(extract.city, 100)
         record.brand_name = _truncate_db_field(extract.brand, 100)
         record.model_name = _truncate_db_field(extract.model, 120)
+        record.model_year = extract.year
         record.trim_name = _truncate_db_field(extract.trim, 120)
         record.car_reference_id = car_reference_id
         record.created_at_source = extract.created_at_source
@@ -452,6 +457,7 @@ def _upsert_kn_scraped_listing(db: Session, extract: KNDetailExtract, car_refere
         city=_truncate_db_field(extract.city, 100),
         brand_name=_truncate_db_field(extract.brand, 100),
         model_name=_truncate_db_field(extract.model, 120),
+        model_year=extract.year,
         trim_name=_truncate_db_field(extract.trim, 120),
         car_reference_id=car_reference_id,
         created_at_source=extract.created_at_source,

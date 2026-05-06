@@ -62,6 +62,46 @@ if _discovery_beat_enabled:
         "schedule": timedelta(seconds=_discovery_interval_s),
     }
 
+_listing_feeder_beat_enabled = os.getenv("LISTING_FEEDER_BEAT_ENABLED", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
+if _listing_feeder_beat_enabled:
+    try:
+        _listing_feeder_interval_s = int(os.getenv("LISTING_FEEDER_INTERVAL_SECONDS", "1800"))
+    except ValueError:
+        _listing_feeder_interval_s = 1800
+    _listing_feeder_interval_s = max(_listing_feeder_interval_s, 300)
+    _beat_schedule["listing-feeder-every-interval"] = {
+        "task": "tasks.crawl_listing_pages",
+        "schedule": timedelta(seconds=_listing_feeder_interval_s),
+    }
+
+_kn_beat_enabled = os.getenv("KN_INGESTION_BEAT_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
+if _kn_beat_enabled:
+    try:
+        _kn_interval_s = int(os.getenv("KN_INGESTION_INTERVAL_SECONDS", "30"))
+    except ValueError:
+        _kn_interval_s = 30
+    _kn_interval_s = max(_kn_interval_s, 10)
+    _beat_schedule["kn-ingestion-queue-every-interval"] = {
+        "task": "tasks.kn_ingestion_tick",
+        "schedule": timedelta(seconds=_kn_interval_s),
+    }
+
+_hm_beat_enabled = os.getenv("HM_INGESTION_BEAT_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
+if _hm_beat_enabled:
+    try:
+        _hm_interval_s = int(os.getenv("HM_INGESTION_INTERVAL_SECONDS", "30"))
+    except ValueError:
+        _hm_interval_s = 30
+    _hm_interval_s = max(_hm_interval_s, 10)
+    _beat_schedule["hm-ingestion-queue-every-interval"] = {
+        "task": "tasks.hm_ingestion_tick",
+        "schedule": timedelta(seconds=_hm_interval_s),
+    }
+
 _mapping_pipeline_beat_enabled = os.getenv("MAPPING_PIPELINE_BEAT_ENABLED", "1").strip().lower() not in {
     "0",
     "false",

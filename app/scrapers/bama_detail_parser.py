@@ -30,6 +30,8 @@ _FA_AR_TO_EN_DIGITS = str.maketrans(
     "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩",
     "01234567890123456789",
 )
+_YEAR_FROM_URL_END_RE = re.compile(r"(?:[-_/]|%2[fF]|%2[dD])(1[34]\d{2}|19\d{2}|20\d{2})(?:[/#?]|$)")
+_YEAR_FROM_TEXT_RE = re.compile(r"(?<!\d)(1[34]\d{2}|19\d{2}|20\d{2})(?!\d)")
 
 _REACTIVE_WRAPPERS = frozenset({"Reactive", "ShallowReactive", "Ref"})
 _TIMESTAMP_KEYS_EXACT = frozenset(
@@ -60,6 +62,36 @@ def _normalize_digit_chars(text: str) -> str:
     for ch in ("،", ",", "٬", " ", "\u200c", "\u200f", "\u202b", "\u202c"):
         t = t.replace(ch, "")
     return t
+
+
+def _normalize_model_year(year: int | None) -> int | None:
+    if year is None:
+        return None
+    if year > 1800:
+        year = year - 621
+    if 1300 <= year <= 1499:
+        return year
+    return None
+
+
+def _extract_model_year_candidates_from_text(text: str | None) -> int | None:
+    if not text:
+        return None
+    normalized = _normalize_digit_chars(text)
+    m = _YEAR_FROM_TEXT_RE.search(normalized)
+    if not m:
+        return None
+    return _normalize_model_year(int(m.group(1)))
+
+
+def _extract_model_year_from_url_tail(url_text: str | None) -> int | None:
+    if not url_text:
+        return None
+    normalized = _normalize_digit_chars(url_text)
+    m = _YEAR_FROM_URL_END_RE.search(normalized)
+    if not m:
+        return None
+    return _normalize_model_year(int(m.group(1)))
 
 
 def _looks_like_persian_relative_time(text: str) -> bool:
@@ -1251,6 +1283,13 @@ def _merge_nuxt_regex_into_extract(
     model = nf["model"] if nf and nf["model"] else base.model
     trim = nf["trim"] if nf and nf["trim"] else base.trim
     year = nf["year"] if nf and nf["year"] is not None else base.year
+    year = _normalize_model_year(year)
+    if year is None:
+        year = _extract_model_year_from_url_tail(base.listing_url)
+    if year is None:
+        year = _extract_model_year_candidates_from_text(base.model)
+    if year is None:
+        year = _extract_model_year_candidates_from_text(base.trim)
     mileage = nf["mileage"] if nf and nf["mileage"] is not None else base.mileage
     color = nf["color"] if nf and nf["color"] else base.color
     transmission = nf["gearbox_text"] if nf and nf["gearbox_text"] else base.transmission

@@ -111,6 +111,23 @@ def similarity_score(a: str, b: str) -> int:
 def ensure_mapping_review_columns() -> None:
     statements = [
         """
+        CREATE TABLE IF NOT EXISTS mapping_provider_data (
+            id BIGSERIAL PRIMARY KEY,
+            provider_name VARCHAR(50) NOT NULL,
+            source_string VARCHAR(300) NOT NULL,
+            target_reference_id INTEGER NULL REFERENCES car_entities(id) ON DELETE SET NULL,
+            match_score INTEGER NULL,
+            is_verified BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(provider_name, source_string)
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS ix_mapping_provider_data_provider_target
+        ON mapping_provider_data(provider_name, target_reference_id)
+        """,
+        """
         ALTER TABLE mapping_provider_data
         ADD COLUMN IF NOT EXISTS match_score INTEGER NULL
         """,

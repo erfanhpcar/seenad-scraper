@@ -81,6 +81,7 @@ class ScrapedListing(Base):
     city: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     brand_name: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     model_name: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    model_year: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     trim_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     car_reference_id: Mapped[int | None] = mapped_column(
         ForeignKey("car_entities.id", ondelete="SET NULL"), nullable=True, index=True

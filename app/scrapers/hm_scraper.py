@@ -312,11 +312,32 @@ def _extract_next_data_brand_model(next_data: dict[str, Any]) -> tuple[str | Non
 
     for node in _iter_dict_nodes(next_data):
         if brand is None:
-            brand = _first_non_empty_string([node.get("brandName")])
+            brand = _first_non_empty_string(
+                [
+                    node.get("brandName"),
+                    node.get("carBrandName"),
+                    node.get("brand"),
+                    node.get("carBrandEnglishName"),
+                ]
+            )
         if model is None:
-            model = _first_non_empty_string([node.get("modelName")])
+            model = _first_non_empty_string(
+                [
+                    node.get("modelName"),
+                    node.get("carModelName"),
+                    node.get("model"),
+                    node.get("carModelEnglishName"),
+                ]
+            )
         if trim is None:
-            trim = _first_non_empty_string([node.get("trimName"), node.get("trim"), node.get("typeName")])
+            trim = _first_non_empty_string(
+                [
+                    node.get("trimName"),
+                    node.get("trim"),
+                    node.get("typeName"),
+                    node.get("carTypeName"),
+                ]
+            )
         if brand and model:
             break
     return brand, model, trim
