@@ -1,0 +1,46 @@
+# Seenad Project - Production-Ready Coding Guidelines
+# Based on Guidelines by Iman
+
+core_principles:
+  - "Follow strict layered (n-tier) architecture: Controller -> Service -> Repository -> Model."
+  - "No pseudo-code or TODOs. Code must be production-ready and fully type-hinted."
+  - "Readability over cleverness. Use explicit, unambiguous names."
+  - "DRY (Don't Repeat Yourself) but maintain clear separation of concerns."
+
+naming_conventions:
+  database:
+    tables: "snake_case and SINGULAR (e.g., 'scraped_listing', not 'scraped_listings')."
+    columns: "snake_case. Mandatory: 'id', 'created_at', 'updated_at'."
+  python:
+    classes: "PascalCase (e.g., 'CarMatchingService')."
+    functions_and_variables: "snake_case (e.g., 'get_car_by_id')."
+    constants: "UPPER_SNAKE_CASE."
+  services: "<domain>-<context>-<service-type> (e.g., 'car-matching-service')."
+
+architectural_layers:
+  controller:
+    - "Handle HTTP requests/responses only."
+    - "No business logic here. Use Pydantic schemas for validation."
+    - "Standardized JSON responses: {success: bool, data: any, error: any, meta: any}."
+  service:
+    - "The 'Brain' of the app. All business logic and domain validation resides here."
+    - "Do NOT raise HTTPException here; raise custom Domain Exceptions."
+    - "Avoid direct DB access; use Repository layer."
+  repository:
+    - "The only layer that interacts with the Database (SQLAlchemy)."
+    - "Focus on CRUD operations and complex queries."
+  model:
+    - "Define SQLAlchemy models and Pydantic schemas."
+
+database_rules:
+  - "Database changes MUST use Alembic migrations. No manual DB edits."
+  - "Follow 3NF/4NF normalization principles."
+  - "Use soft deletes instead of hard deletes where applicable."
+
+api_standards:
+  - "Versioned APIs (e.g., /api/v1/)."
+  - "Consistent error handling with clear status codes and messages."
+  - "Use Pydantic for request body and response model filtering."
+
+file_structure:
+  - "Organize by DOMAIN, not by type. Example: src/listing/ (contains controller, service, repo)."

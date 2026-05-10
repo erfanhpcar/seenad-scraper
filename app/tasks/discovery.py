@@ -5,11 +5,12 @@ from __future__ import annotations
 import logging
 import os
 import re
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import unquote, urljoin, urlparse, urlunparse
 
 import redis
 import requests
 from bs4 import BeautifulSoup
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
 
 from app.celery_app import celery_app
 from app.scrapers.bama_detail_parser import BAMA_DOMAIN, _random_headers
@@ -17,9 +18,39 @@ from app.scrapers.bama_scraper import USER_AGENTS
 
 LOGGER = logging.getLogger(__name__)
 
+_MODERN_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+)
+
 _DETAIL_PATH_RE = re.compile(r"/car/detail-[^\s\"'<>?#]+", re.IGNORECASE)
 _KN_DETAIL_RE = re.compile(r"/used-cars/[0-9a-f-]{36}", re.IGNORECASE)
 _HM_DETAIL_RE = re.compile(r"/cars-for-sale/[A-Za-z0-9%_-]+/[A-Za-z0-9%_-]+/\d+/?", re.IGNORECASE)
+
+
+def _classify_request_error(exc: BaseException) -> str:
+    """Return a short human-friendly tag for common request failures."""
+    if isinstance(exc, requests.exceptions.SSLError):
+        msg = str(exc).lower()
+        if "handshake" in msg or "sslv3_alert" in msg:
+            return "ssl_handshake_failure"
+        return "ssl_error"
+    if isinstance(exc, requests.exceptions.ConnectTimeout):
+        return "connect_timeout"
+    if isinstance(exc, requests.exceptions.ReadTimeout):
+        return "read_timeout"
+    if isinstance(exc, requests.exceptions.Timeout):
+        return "timeout"
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        msg = str(exc).lower()
+        if "reset by peer" in msg or "connection reset" in msg:
+            return "connection_reset_by_peer"
+        if "name or service not known" in msg or "failed to resolve" in msg:
+            return "dns_failure"
+        return "connection_error"
+    if isinstance(exc, requests.exceptions.HTTPError):
+        return "http_error"
+    return "request_error"
 
 
 def _queue_key() -> str:
@@ -86,14 +117,21 @@ def _redis_client() -> redis.Redis:
 
 
 def _fetch_html_generic(url: str, *, timeout_seconds: float = 45.0) -> str:
+    """GET an HTML page using a modern UA and conservative HTTP/1.1 headers.
+
+    ``timeout_seconds`` is a single value applied to both connect and read; we use a
+    longer wall-clock here than for ingestion to be tolerant of slow Arvan edges.
+    """
     headers = {
-        "User-Agent": USER_AGENTS[0],
+        "User-Agent": _MODERN_USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7",
         "Connection": "keep-alive",
         "Referer": url.strip(),
+        "Upgrade-Insecure-Requests": "1",
     }
-    response = requests.get(url.strip(), headers=headers, timeout=timeout_seconds)
+    # (connect, read) split so SSL handshake gets a generous window before read.
+    response = requests.get(url.strip(), headers=headers, timeout=(15.0, timeout_seconds))
     response.raise_for_status()
     if response.encoding is None or response.encoding.lower() == "iso-8859-1":
         response.encoding = response.apparent_encoding or "utf-8"
@@ -101,10 +139,23 @@ def _fetch_html_generic(url: str, *, timeout_seconds: float = 45.0) -> str:
 
 
 def _fetch_hm_listing_html(url: str, *, timeout_seconds: float = 45.0) -> str:
+    """Fetch a hamrah-mechanic list page, preferring the domain (resolved via /etc/hosts).
+
+    Order of attempts is intentionally:
+      1. Real domain over HTTPS (SNI works because /etc/hosts already routes to the IP).
+      2. Direct IP over HTTP (Arvan edge serves HTTP fine; avoids the bad TLS handshake).
+      3. Direct IP over HTTPS with verify=False (last-resort, server frequently rejects with
+         ``SSLV3_ALERT_HANDSHAKE_FAILURE`` because it has no cert pinned to the bare IP).
+    """
     try:
         return _fetch_html_generic(url, timeout_seconds=timeout_seconds)
-    except requests.RequestException:
-        pass
+    except requests.RequestException as exc:
+        LOGGER.warning(
+            "hm discovery domain fetch failed url=%s reason=%s detail=%s",
+            url,
+            _classify_request_error(exc),
+            exc,
+        )
 
     parsed = urlparse(url.strip())
     path_part = urlunparse(("", "", parsed.path or "/", parsed.params, parsed.query, parsed.fragment))
@@ -113,30 +164,47 @@ def _fetch_hm_listing_html(url: str, *, timeout_seconds: float = 45.0) -> str:
         os.getenv("HM_DIRECT_IP", "").strip() or "185.143.232.253",
         os.getenv("HM_DIRECT_IP_2", "").strip() or "185.143.235.253",
     ]
+    common_headers = {
+        "User-Agent": _MODERN_USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Connection": "keep-alive",
+        "Host": host,
+        "Referer": "https://www.hamrah-mechanic.com/cars-for-sale/",
+        "Upgrade-Insecure-Requests": "1",
+    }
+    requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
     for ip in ip_candidates:
         if not ip:
             continue
-        try:
-            headers = {
-                "User-Agent": USER_AGENTS[0],
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Connection": "keep-alive",
-                "Host": host,
-                "Referer": "https://www.hamrah-mechanic.com/cars-for-sale/",
-            }
-            response = requests.get(
-                f"https://{ip}{path_part}",
-                headers=headers,
-                timeout=timeout_seconds,
-                verify=False,
-            )
-            response.raise_for_status()
-            if response.encoding is None or response.encoding.lower() == "iso-8859-1":
-                response.encoding = response.apparent_encoding or "utf-8"
-            return response.text
-        except requests.RequestException:
-            continue
+        for scheme, verify_ssl in (("http", True), ("https", False)):
+            target = f"{scheme}://{ip}{path_part}"
+            try:
+                response = requests.get(
+                    target,
+                    headers=common_headers,
+                    timeout=(15.0, timeout_seconds),
+                    verify=verify_ssl,
+                )
+                response.raise_for_status()
+                if scheme == "https":
+                    LOGGER.warning(
+                        "hm discovery succeeded via direct-IP HTTPS with verify=False ip=%s url=%s",
+                        ip,
+                        url,
+                    )
+                if response.encoding is None or response.encoding.lower() == "iso-8859-1":
+                    response.encoding = response.apparent_encoding or "utf-8"
+                return response.text
+            except requests.RequestException as exc:
+                LOGGER.warning(
+                    "hm discovery direct-ip fetch failed ip=%s scheme=%s reason=%s detail=%s",
+                    ip,
+                    scheme,
+                    _classify_request_error(exc),
+                    exc,
+                )
+                continue
     raise requests.RequestException(f"HM fetch failed for {url}")
 
 
@@ -225,27 +293,52 @@ def bama_discovery_task() -> dict[str, object]:
 
 
 def _kn_listing_pages_to_fetch() -> list[str]:
+    """Return karnameh paginated listing URLs.
+
+    Override list with ``KN_DISCOVERY_LIST_URLS`` (comma separated). Otherwise sweep pages
+    1..``KN_DISCOVERY_PAGES_MAX`` (default 8) which currently covers the full public catalog
+    (~156 unique listings as of 2026-05).
+    """
     raw = os.getenv("KN_DISCOVERY_LIST_URLS", "").strip()
     if raw:
         return [u.strip() for u in raw.split(",") if u.strip()]
-    return [
-        "https://karnameh.com/buy-used-cars",
-        "https://karnameh.com/buy-used-cars?page=2",
-    ]
+    try:
+        pages_max = int(os.getenv("KN_DISCOVERY_PAGES_MAX", "8"))
+    except ValueError:
+        pages_max = 8
+    pages_max = max(1, min(pages_max, 30))
+    urls = ["https://karnameh.com/buy-used-cars"]
+    for page in range(2, pages_max + 1):
+        urls.append(f"https://karnameh.com/buy-used-cars?page={page}")
+    return urls
 
 
 def _hm_listing_pages_to_fetch() -> list[str]:
+    """Return hamrah-mechanic listing URLs (multiple filters/pages for breadth).
+
+    Override list with ``HM_DISCOVERY_LIST_URLS``. Default sweeps the main feed plus a few
+    high-yield filters and the first ``HM_DISCOVERY_PAGES_MAX`` (default 5) paginated views.
+    """
     raw = os.getenv("HM_DISCOVERY_LIST_URLS", "").strip()
     if raw:
         return [u.strip() for u in raw.split(",") if u.strip()]
-    return [
+    try:
+        pages_max = int(os.getenv("HM_DISCOVERY_PAGES_MAX", "5"))
+    except ValueError:
+        pages_max = 5
+    pages_max = max(1, min(pages_max, 20))
+    urls = [
         "https://www.hamrah-mechanic.com/cars-for-sale/",
         "https://www.hamrah-mechanic.com/cars-for-sale/?kmStatus=2",
+        "https://www.hamrah-mechanic.com/cars-for-sale/?sortBy=newest",
     ]
+    for page in range(2, pages_max + 1):
+        urls.append(f"https://www.hamrah-mechanic.com/cars-for-sale/?page={page}")
+    return urls
 
 
 def _normalize_kn_detail_url(raw_href: str) -> str | None:
-    href = raw_href.strip()
+    href = unquote(raw_href.strip())
     if not href:
         return None
     if href.startswith("//"):
@@ -254,7 +347,7 @@ def _normalize_kn_detail_url(raw_href: str) -> str | None:
     parsed = urlparse(full)
     if parsed.netloc not in {"karnameh.com", "www.karnameh.com"}:
         return None
-    match = _KN_DETAIL_RE.search(parsed.path)
+    match = _KN_DETAIL_RE.search(unquote(parsed.path))
     if not match:
         return None
     return f"https://karnameh.com{match.group(0).rstrip('/')}"
@@ -272,7 +365,11 @@ def _normalize_hm_detail_url(raw_href: str) -> str | None:
         return None
     match = _HM_DETAIL_RE.search(parsed.path)
     if not match:
-        return None
+        # HM detail paths sometimes contain encoded spaces (e.g. "tiggo%207%20pro");
+        # try once with the raw unquoted path for resilience.
+        match = _HM_DETAIL_RE.search(unquote(parsed.path))
+        if not match:
+            return None
     path = match.group(0).rstrip("/") + "/"
     return f"https://www.hamrah-mechanic.com{path}"
 
@@ -348,27 +445,48 @@ def crawl_listing_pages_task() -> dict[str, object]:
             html = _fetch_listing_html(src)
             batch = _extract_detail_urls_from_html(html)
             LOGGER.info("crawl_listing_pages bama source=%s links=%s", src, len(batch))
+            if not batch:
+                LOGGER.warning("crawl_listing_pages bama: No URLs found in list page source=%s", src)
             bama_candidates.extend(batch)
-        except requests.RequestException:
-            LOGGER.warning("crawl_listing_pages Bama fetch failed source=%s", src, exc_info=True)
+        except requests.RequestException as exc:
+            LOGGER.warning(
+                "crawl_listing_pages Bama fetch failed source=%s reason=%s detail=%s",
+                src,
+                _classify_request_error(exc),
+                exc,
+            )
 
     for src in _kn_listing_pages_to_fetch():
         try:
             html = _fetch_html_generic(src)
             batch = _extract_urls_from_html(html, normalizer=_normalize_kn_detail_url, embedded_re=_KN_DETAIL_RE)
             LOGGER.info("crawl_listing_pages kn source=%s links=%s", src, len(batch))
+            if not batch:
+                LOGGER.warning("crawl_listing_pages kn: No URLs found in list page source=%s", src)
             kn_candidates.extend(batch)
-        except requests.RequestException:
-            LOGGER.warning("crawl_listing_pages KN fetch failed source=%s", src, exc_info=True)
+        except requests.RequestException as exc:
+            LOGGER.warning(
+                "crawl_listing_pages KN fetch failed source=%s reason=%s detail=%s",
+                src,
+                _classify_request_error(exc),
+                exc,
+            )
 
     for src in _hm_listing_pages_to_fetch():
         try:
             html = _fetch_hm_listing_html(src)
             batch = _extract_urls_from_html(html, normalizer=_normalize_hm_detail_url, embedded_re=_HM_DETAIL_RE)
             LOGGER.info("crawl_listing_pages hm source=%s links=%s", src, len(batch))
+            if not batch:
+                LOGGER.warning("crawl_listing_pages hm: No URLs found in list page source=%s", src)
             hm_candidates.extend(batch)
-        except requests.RequestException:
-            LOGGER.warning("crawl_listing_pages HM fetch failed source=%s", src, exc_info=True)
+        except requests.RequestException as exc:
+            LOGGER.warning(
+                "crawl_listing_pages HM fetch failed source=%s reason=%s detail=%s",
+                src,
+                _classify_request_error(exc),
+                exc,
+            )
 
     bama_unique = list(dict.fromkeys(bama_candidates))
     kn_unique = list(dict.fromkeys(kn_candidates))

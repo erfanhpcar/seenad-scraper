@@ -17,8 +17,8 @@ import requests
 from bs4 import BeautifulSoup
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 
-from app.scrapers.bama_scraper import USER_AGENTS, _extract_external_id
-from app.scrapers.hm_scraper import _to_iso8601_timestamp
+from app.scrapers.bama_scraper import _extract_external_id
+from app.scrapers.hm_scraper import _classify_request_error, _to_iso8601_timestamp
 
 LOGGER = logging.getLogger(__name__)
 
@@ -34,6 +34,16 @@ KN_DIRECT_IP_CANDIDATES = tuple(
         os.getenv("KN_DIRECT_IP_4", "").strip() or "185.166.104.3",
     )
     if ip.strip()
+)
+
+KN_USER_AGENTS = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.6 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0",
 )
 
 _FA_AR_TO_EN_DIGITS = str.maketrans(
@@ -428,13 +438,14 @@ def _dynamic_referer(listing_url: str) -> str:
     return random.choice(candidates)
 
 
-def _random_headers(listing_url: str) -> dict[str, str]:
+def _random_headers(listing_url: str, *, override_host: str | None = None) -> dict[str, str]:
     headers = {
-        "User-Agent": random.choice(USER_AGENTS),
+        "User-Agent": random.choice(KN_USER_AGENTS),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7",
         "Referer": _dynamic_referer(listing_url),
         "Connection": "keep-alive",
+        "Accept-Encoding": "gzip, deflate",
         "Cache-Control": "max-age=0",
         "Pragma": "no-cache",
         "Upgrade-Insecure-Requests": "1",
@@ -443,8 +454,8 @@ def _random_headers(listing_url: str) -> dict[str, str]:
         "Sec-Fetch-Site": "same-origin",
         "Sec-Fetch-User": "?1",
     }
-    if KN_DIRECT_IP:
-        headers["Host"] = KN_HOST
+    if override_host:
+        headers["Host"] = override_host
     return headers
 
 
@@ -460,37 +471,63 @@ def _build_direct_ip_url(url: str, ip: str | None = None, scheme: str | None = N
 
 
 def fetch_listing_html(url: str, *, timeout_seconds: float = 45.0) -> str:
+    """Fetch one Karnameh listing detail page resiliently.
+
+    Same attempt strategy as ``hm_scraper.fetch_listing_html``: try the real domain first
+    (``/etc/hosts`` already maps it to the direct IP, so SNI works), then fall back to
+    direct-IP HTTP, then direct-IP HTTPS with ``verify=False`` as a noisy last resort.
+    """
     normalized = url.strip()
     if not normalized.startswith("http"):
         normalized = f"{KN_DOMAIN}/{normalized.lstrip('/')}"
-    headers = _random_headers(normalized)
-    attempts: list[tuple[str, bool]] = []
-    if KN_DIRECT_IP_CANDIDATES:
-        for ip in KN_DIRECT_IP_CANDIDATES:
-            attempts.append((_build_direct_ip_url(normalized, ip=ip, scheme="https"), False))
-            attempts.append((_build_direct_ip_url(normalized, ip=ip, scheme="http"), True))
-    attempts.append((normalized, True))
+
+    connect_timeout = float(os.getenv("KN_CONNECT_TIMEOUT_SECONDS", "20"))
+    timeouts = (connect_timeout, timeout_seconds)
+    requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
+
+    attempts: list[tuple[str, bool, str | None, str]] = [
+        (normalized, True, None, "domain_https"),
+    ]
+    for ip in KN_DIRECT_IP_CANDIDATES:
+        attempts.append(
+            (_build_direct_ip_url(normalized, ip=ip, scheme="http"), True, KN_HOST, f"direct_ip_http:{ip}")
+        )
+    for ip in KN_DIRECT_IP_CANDIDATES:
+        attempts.append(
+            (_build_direct_ip_url(normalized, ip=ip, scheme="https"), False, KN_HOST, f"direct_ip_https:{ip}")
+        )
 
     last_error: Exception | None = None
-    for request_url, verify_ssl in attempts:
+    for request_url, verify_ssl, override_host, attempt_label in attempts:
         try:
             time.sleep(random.uniform(3, 7))
-            if not verify_ssl:
-                requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
+            headers = _random_headers(normalized, override_host=override_host)
             response = requests.get(
                 request_url,
                 headers=headers,
-                timeout=timeout_seconds,
+                timeout=timeouts,
                 verify=verify_ssl,
                 allow_redirects=True,
             )
             response.raise_for_status()
             if response.encoding is None or response.encoding.lower() == "iso-8859-1":
                 response.encoding = response.apparent_encoding or "utf-8"
+            if attempt_label.startswith("direct_ip_https"):
+                LOGGER.warning(
+                    "kn_scraper succeeded on insecure direct-ip HTTPS fallback (verify=False) attempt=%s url=%s",
+                    attempt_label,
+                    url,
+                )
             return response.text
         except requests.RequestException as exc:
             last_error = exc
-            LOGGER.warning("kn_scraper request attempt failed url=%s detail=%s", request_url, exc)
+            LOGGER.warning(
+                "kn_scraper request attempt failed attempt=%s url=%s reason=%s detail=%s",
+                attempt_label,
+                request_url,
+                _classify_request_error(exc),
+                exc,
+            )
             continue
     if last_error is not None:
         raise last_error

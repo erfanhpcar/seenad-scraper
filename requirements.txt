@@ -9,3 +9,4 @@ jdatetime
 beautifulsoup4
 celery[redis]
 redis
+rapidfuzz

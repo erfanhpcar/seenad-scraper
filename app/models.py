@@ -7,6 +7,26 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
 
+class CarZeroPrice(Base):
+    """Zero-kilometre catalogue price for a taxonomy row (see postgres/migrations/011_car_zero_price.sql)."""
+
+    __tablename__ = "car_zero_price"
+
+    car_reference_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("car_entities.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    price: Mapped[float] = mapped_column(Numeric(14, 2), nullable=False)
+    currency: Mapped[str] = mapped_column(String(16), nullable=False, default="IRR")
+    model_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    price_provider: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    bama_car_price_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False, default="bama.ir/price")
+    raw_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class CarEntity(Base):
     """Reference row for calculator / listings (Bama taxonomy: brand → model → trim)."""
 
