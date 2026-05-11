@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint, func
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -24,7 +24,35 @@ class CarZeroPrice(Base):
     bama_car_price_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
     source: Mapped[str] = mapped_column(String(64), nullable=False, default="bama.ir/price")
     raw_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    scrape_batch_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class CarZeroPriceScrapeSnapshot(Base):
+    """One raw hierarchy row from Bama CAD API per batch (012_car_zero_price_scrape_snapshot.sql)."""
+
+    __tablename__ = "car_zero_price_scrape_snapshot"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True, index=True)
+    batch_id: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    hierarchy_page_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    brand_name_raw: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    brand_slug_raw: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    model_name_raw: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    model_slug_raw: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    trim_name_raw: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    trim_slug_raw: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    model_year_raw: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    price_raw: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    price_provider: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    bama_car_price_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    raw_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        index=True,
+    )
 
 
 class CarEntity(Base):

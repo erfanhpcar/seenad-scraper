@@ -125,13 +125,13 @@ _zero_price_beat_enabled = os.getenv("BAMA_ZERO_PRICE_BEAT_ENABLED", "1").strip(
     "no",
 }
 if _zero_price_beat_enabled:
-    # Daily 08:00 Asia/Tehran (Iran Standard Time, no DST): equivalent to 04:30 UTC.
+    # Daily 10:00 Asia/Tehran (Iran Standard Time, no DST): equivalent to 06:30 UTC.
     # Override with BAMA_ZERO_PRICE_BEAT_HOUR_UTC / BAMA_ZERO_PRICE_BEAT_MINUTE_UTC if needed.
     try:
-        _zero_price_hour = int(os.getenv("BAMA_ZERO_PRICE_BEAT_HOUR_UTC", "4"))
+        _zero_price_hour = int(os.getenv("BAMA_ZERO_PRICE_BEAT_HOUR_UTC", "6"))
         _zero_price_minute = int(os.getenv("BAMA_ZERO_PRICE_BEAT_MINUTE_UTC", "30"))
     except ValueError:
-        _zero_price_hour, _zero_price_minute = 4, 30
+        _zero_price_hour, _zero_price_minute = 6, 30
     _beat_schedule["bama-zero-price-daily"] = {
         "task": "tasks.bama_zero_price_scrape",
         "schedule": crontab(hour=_zero_price_hour, minute=_zero_price_minute),

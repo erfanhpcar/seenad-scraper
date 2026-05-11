@@ -44,3 +44,10 @@ api_standards:
 
 file_structure:
   - "Organize by DOMAIN, not by type. Example: src/listing/ (contains controller, service, repo)."
+
+## Docker & Database Environment Rules
+- **Environment:** This project runs entirely inside Docker. Always prefix commands with `docker compose exec [service]`.
+- **Non-Interactive Execution:** Always use the `-T` flag with `docker compose exec` to avoid TTY issues in non-interactive shells.
+- **Database Access:** NEVER run `psql` in a way that prompts for a password. Always use the internal environment variables and `PGPASSWORD` for direct execution.
+  - **Correct Pattern:** `docker compose exec -T db sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "YOUR_QUERY_HERE"'`
+  - **Wait Event & Performance Monitoring:** When checking database locks or activity, use the `pg_stat_activity` query provided in the documentation, wrapped in the `sh -c` pattern above to ensure zero-interaction.

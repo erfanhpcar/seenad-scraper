@@ -3,13 +3,18 @@ Bama.ir zero-price (catalogue day price) ingestion via official CAD JSON APIs.
 
 Feeds used (same as the Nuxt frontend on https://bama.ir/price):
 
-- ``GET /cad/api/price/hierarchy?pageIndex=&pageSize=`` — grouped trims with IRR prices.
+- ``GET /cad/api/price/hierarchy?pageIndex=&pageSize=`` — full catalogue hierarchy
+  (all brands/models/trims), not “popular-only” UX lists. Pagination walks every page until
+  the API returns no data or fewer than ``page_size`` groups (unless ``max_hierarchy_pages`` caps it).
 
 Rows are matched to ``car_entities`` with RapidFuzz (fuzzy string scores are logged).
 
 A row is persisted only if ``min(brand_score, model_score, trim_score) >= 75``.
 
-Persist one row per ``car_reference_id`` in ``car_zero_price`` (upsert).
+Persist one row per ``car_reference_id`` in ``car_zero_price`` (latest-value upsert).
+
+Persist **every** hierarchy line as string fields + JSON in ``car_zero_price_scrape_snapshot``
+under a fresh ``batch_id`` so price history is preserved per run.
 
 """
 
@@ -19,26 +24,30 @@ import json
 import logging
 import random
 import time
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Final, Iterator, Mapping, Sequence
 
 import requests
 from rapidfuzz import fuzz, process
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
-from app.models import CarEntity, CarZeroPrice
+from app.models import CarEntity, CarZeroPrice, CarZeroPriceScrapeSnapshot
 
 LOGGER: Final = logging.getLogger(__name__)
 
 BAMA_BASE_URL: Final[str] = "https://bama.ir"
 HIERARCHY_PATH: Final[str] = "/cad/api/price/hierarchy"
 DEFAULT_PAGE_SIZE: Final[int] = 75
+DEFAULT_PAGE_SIZE_MAX: Final[int] = 500
 DEFAULT_REQUEST_TIMEOUT_S: Final[float] = 45.0
+RAW_SNAPSHOT_DB_FLUSH_INTERVAL: Final[int] = 400
 USER_AGENT: Final[str] = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -56,6 +65,11 @@ MIN_COMBINED_MATCH_SCORE: Final[int] = 75
 RAW_SNAPSHOT_MAX_JSON_LEN: Final[int] = 8000
 
 
+def generate_scrape_batch_id() -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{timestamp}-{uuid.uuid4().hex[:8]}"
+
+
 @dataclass(frozen=True, slots=True)
 class BamaHierarchyItem:
     """One trim line from the hierarchy API ``items`` array."""
@@ -71,6 +85,14 @@ class BamaHierarchyItem:
     price_provider: str | None
     bama_car_price_id: int | None
     raw: Mapping[str, Any]
+    brand_name_raw: str
+    brand_slug_raw: str
+    model_name_raw: str
+    model_slug_raw: str
+    trim_name_raw: str
+    trim_slug_raw: str
+    model_year_raw: str
+    price_raw: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +116,8 @@ class BamaZeroPriceRunSummary:
     skipped_no_entity: int
     rejected_low_score: int
     errors_http: int
+    raw_rows_persisted: int
+    batch_id: str | None
 
     def as_celery_dict(self) -> dict[str, Any]:
         return {
@@ -105,6 +129,8 @@ class BamaZeroPriceRunSummary:
             "skipped_no_entity": self.skipped_no_entity,
             "rejected_low_score": self.rejected_low_score,
             "errors_http": self.errors_http,
+            "raw_rows_persisted": self.raw_rows_persisted,
+            "batch_id": self.batch_id,
         }
 
 
@@ -455,22 +481,59 @@ def _http_session() -> requests.Session:
 def _optional_int(value: Any) -> int | None:
     if value is None:
         return None
-    return int(value)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _api_raw_str(value: Any) -> str:
+    """Preserve API scalars as strings for fuzzy pre-mapping (no parsing / locale normalization)."""
+
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _coerce_price_irr(value: Any) -> int:
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _parse_hierarchy_item(brand_bundle: Mapping[str, Any], item: Mapping[str, Any]) -> BamaHierarchyItem:
+    brand_slug_val = _api_raw_str(item.get("brand") or brand_bundle.get("brand"))
+    brand_fa_val = _api_raw_str(item.get("brand_fa") or brand_bundle.get("brand_fa"))
+    model_slug_val = _api_raw_str(item.get("model"))
+    model_fa_val = _api_raw_str(item.get("model_fa"))
+    trim_slug_val = _api_raw_str(item.get("trim"))
+    trim_fa_val = _api_raw_str(item.get("trim_fa"))
+    price_raw = _api_raw_str(item.get("price"))
+    model_year_raw = _api_raw_str(item.get("model_year"))
+    price_provider = item.get("price_provider") if item.get("price_provider") else None
     return BamaHierarchyItem(
-        brand_slug=str(item.get("brand") or brand_bundle.get("brand") or ""),
-        brand_fa=str(item.get("brand_fa") or brand_bundle.get("brand_fa") or ""),
-        model_slug=str(item.get("model") or ""),
-        model_fa=str(item.get("model_fa") or ""),
-        trim_slug=str(item.get("trim") or ""),
-        trim_fa=str(item.get("trim_fa") or ""),
-        price_irr=int(item.get("price") or 0),
+        brand_slug=brand_slug_val,
+        brand_fa=brand_fa_val,
+        model_slug=model_slug_val,
+        model_fa=model_fa_val,
+        trim_slug=trim_slug_val,
+        trim_fa=trim_fa_val,
+        price_irr=_coerce_price_irr(item.get("price")),
         model_year=_optional_int(item.get("model_year")),
-        price_provider=item.get("price_provider") if item.get("price_provider") else None,
+        price_provider=price_provider,
         bama_car_price_id=_optional_int(item.get("car_price_id")),
         raw=item,
+        brand_name_raw=brand_fa_val,
+        brand_slug_raw=brand_slug_val,
+        model_name_raw=model_fa_val,
+        model_slug_raw=model_slug_val,
+        trim_name_raw=trim_fa_val,
+        trim_slug_raw=trim_slug_val,
+        model_year_raw=model_year_raw,
+        price_raw=price_raw,
     )
 
 
@@ -481,12 +544,26 @@ def iterate_hierarchy_items(
     page_size: int = DEFAULT_PAGE_SIZE,
     timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_S,
     inter_page_delay_seconds: tuple[float, float] = (0.4, 1.2),
+    max_hierarchy_pages: int | None = None,
 ) -> Iterator[tuple[int, BamaHierarchyItem]]:
-    """Yield ``(page_index, item)`` across all hierarchy pages (for bookkeeping)."""
+    """Yield ``(page_index, item)`` across all hierarchy pages (for bookkeeping).
+
+    Stops when the API returns no ``data``, or when the number of group blocks is below
+    ``page_size`` (last page). Set ``max_hierarchy_pages`` only for smoke tests — full
+    catalogue crawls should leave it ``None``.
+    """
 
     url = base_url.rstrip("/") + HIERARCHY_PATH
     page_index = 0
     while True:
+        if max_hierarchy_pages is not None and page_index >= max_hierarchy_pages:
+            LOGGER.warning(
+                "bama_price hierarchy early stop max_hierarchy_pages=%s at page_index=%s",
+                max_hierarchy_pages,
+                page_index,
+            )
+            return
+
         time.sleep(random.uniform(*inter_page_delay_seconds))
         response = session.get(
             url,
@@ -496,11 +573,20 @@ def iterate_hierarchy_items(
         response.raise_for_status()
         payload: Mapping[str, Any] = response.json()
         blocks = payload.get("data") or []
+        item_count = 0
+        for group in blocks:
+            if not isinstance(group, Mapping):
+                continue
+            for raw_item in group.get("items") or []:
+                if isinstance(raw_item, Mapping):
+                    item_count += 1
+
         LOGGER.info(
-            "bama_price hierarchy page=%s size=%s groups=%s",
+            "bama_price hierarchy page=%s pageSize(groups)=%s groups=%s trim_rows=%s",
             page_index,
             page_size,
             len(blocks),
+            item_count,
         )
 
         if not blocks:
@@ -529,6 +615,7 @@ def upsert_car_zero_price(
     price_provider: str | None,
     bama_car_price_id: int | None,
     raw_snapshot: Mapping[str, Any] | None,
+    scrape_batch_id: str | None = None,
 ) -> None:
     price_decimal = Decimal(price_irr)
     snap = clipped_json_snapshot(raw_snapshot) if raw_snapshot is not None else None
@@ -542,6 +629,7 @@ def upsert_car_zero_price(
         bama_car_price_id=bama_car_price_id,
         source="bama.ir/price",
         raw_snapshot=snap,
+        scrape_batch_id=scrape_batch_id,
         updated_at=func.now(),
     )
     stmt = stmt.on_conflict_do_update(
@@ -552,10 +640,47 @@ def upsert_car_zero_price(
             "price_provider": stmt.excluded.price_provider,
             "bama_car_price_id": stmt.excluded.bama_car_price_id,
             "raw_snapshot": stmt.excluded.raw_snapshot,
+            "scrape_batch_id": func.coalesce(
+                stmt.excluded.scrape_batch_id,
+                CarZeroPrice.scrape_batch_id,
+            ),
             "updated_at": func.now(),
         },
     )
     db.execute(stmt)
+
+
+def insert_scrape_snapshot_row(db: Session, *, batch_id: str, page_index: int, row: BamaHierarchyItem) -> bool:
+    raw_json: dict[str, Any] | None
+    try:
+        raw_json = dict(row.raw)
+    except (TypeError, ValueError):
+        raw_json = None
+
+    stmt = pg_insert(CarZeroPriceScrapeSnapshot).values(
+        batch_id=batch_id,
+        hierarchy_page_index=page_index,
+        brand_name_raw=row.brand_name_raw,
+        brand_slug_raw=row.brand_slug_raw,
+        model_name_raw=row.model_name_raw,
+        model_slug_raw=row.model_slug_raw,
+        trim_name_raw=row.trim_name_raw,
+        trim_slug_raw=row.trim_slug_raw,
+        model_year_raw=row.model_year_raw,
+        price_raw=row.price_raw,
+        price_provider=row.price_provider,
+        bama_car_price_id=row.bama_car_price_id,
+        raw_json=raw_json,
+    )
+    stmt = stmt.on_conflict_do_nothing(
+        index_elements=[
+            CarZeroPriceScrapeSnapshot.batch_id,
+            CarZeroPriceScrapeSnapshot.bama_car_price_id,
+        ],
+        index_where=text("bama_car_price_id IS NOT NULL"),
+    )
+    result = db.execute(stmt)
+    return result.rowcount != 0
 
 
 def load_car_entities(db: Session) -> list[CarEntity]:
@@ -566,16 +691,31 @@ def run_bama_zero_price_pipeline(
     *,
     page_size: int = DEFAULT_PAGE_SIZE,
     dry_run: bool = False,
+    capture_raw_rows: bool = True,
+    batch_id: str | None = None,
+    max_hierarchy_pages: int | None = None,
 ) -> BamaZeroPriceRunSummary:
     """
     Download the full car hierarchy from Bama, match each row to ``car_entities``,
     and upsert ``car_zero_price`` (unless ``dry_run``).
+
+    When ``capture_raw_rows`` is true and ``dry_run`` is false, every hierarchy line is
+    inserted into ``car_zero_price_scrape_snapshot`` under a fresh timestamped ``batch_id``
+    unless one is supplied for an explicit replay.
     """
 
+    logical_batch: str | None = None
+    if capture_raw_rows:
+        logical_batch = (batch_id or "").strip() or generate_scrape_batch_id()
+    persist_batch: str | None = logical_batch if capture_raw_rows and not dry_run else None
+
     LOGGER.info(
-        "bama_price pipeline start dry_run=%s page_size=%s endpoint=%s",
+        "bama_price pipeline start dry_run=%s page_size=%s capture_raw_rows=%s batch_id=%s max_pages=%s endpoint=%s",
         dry_run,
         page_size,
+        capture_raw_rows,
+        logical_batch,
+        max_hierarchy_pages,
         HIERARCHY_PATH,
     )
     http = _http_session()
@@ -586,14 +726,36 @@ def run_bama_zero_price_pipeline(
     skipped_no_entity = 0
     rejected_low_score = 0
     errors_http = 0
+    raw_rows_persisted = 0
 
     page_indexes: set[int] = set()
     with SessionLocal() as db:
         matcher = CarEntityMatcher(load_car_entities(db))
         try:
-            for page_idx, item in iterate_hierarchy_items(http, page_size=page_size):
+            for page_idx, item in iterate_hierarchy_items(
+                http,
+                page_size=page_size,
+                max_hierarchy_pages=max_hierarchy_pages,
+            ):
                 page_indexes.add(page_idx)
                 items_seen += 1
+                if persist_batch:
+                    inserted_snapshot = insert_scrape_snapshot_row(
+                        db,
+                        batch_id=persist_batch,
+                        page_index=page_idx,
+                        row=item,
+                    )
+                    if inserted_snapshot:
+                        raw_rows_persisted += 1
+                        if raw_rows_persisted % RAW_SNAPSHOT_DB_FLUSH_INTERVAL == 0:
+                            db.commit()
+                            LOGGER.info(
+                                "bama_price raw snapshot flushed rows=%s batch_id=%s",
+                                raw_rows_persisted,
+                                persist_batch,
+                            )
+
                 if item.price_irr <= 0:
                     LOGGER.debug(
                         "bama_price skip non-positive price car_price_id=%s %s/%s/%s",
@@ -644,6 +806,7 @@ def run_bama_zero_price_pipeline(
                     price_provider=item.price_provider,
                     bama_car_price_id=item.bama_car_price_id,
                     raw_snapshot=item.raw,
+                    scrape_batch_id=persist_batch,
                 )
                 upserted += 1
             if not dry_run:
@@ -663,6 +826,8 @@ def run_bama_zero_price_pipeline(
         skipped_no_entity=skipped_no_entity,
         rejected_low_score=rejected_low_score,
         errors_http=errors_http,
+        raw_rows_persisted=raw_rows_persisted,
+        batch_id=logical_batch,
     )
     LOGGER.info(
         "bama_price run summary | hierarchy_rows=%s priced_rows=%s mapped_ok=%s upserted=%s "
