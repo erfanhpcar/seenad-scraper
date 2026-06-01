@@ -1,2 +1,6 @@
 .env
 seenad_full_deploy_v2.zip
+__pycache__/
+*.pyc
+backups/
+data/

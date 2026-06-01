@@ -2,66 +2,54 @@ from __future__ import annotations
 
 import os
 
-import pymssql
+from sqlalchemy import text
+
+from app.external_db import (
+    external_db_connection,
+    get_external_db_settings,
+    ping_external_db,
+    retry_mssql_operation,
+)
 
 
 class ExternalDbInspector:
-    def __init__(self) -> None:
-        self.host = os.getenv("EXT_DB_HOST", "")
-        self.user = os.getenv("EXT_DB_USER", "")
-        self.password = os.getenv("EXT_DB_PASS", "")
-        self.database = os.getenv("EXT_DB_NAME", "")
-        self.port = os.getenv("EXT_DB_PORT", "1433")
+    """Thin wrapper around ``app.external_db`` for scripts and legacy call sites."""
 
-    def _connect(self) -> pymssql.Connection:
-        if not self.host or not self.user or not self.password or not self.database:
-            raise RuntimeError(
-                "Missing external DB config. Set EXT_DB_HOST, EXT_DB_USER, EXT_DB_PASS, EXT_DB_NAME."
-            )
-        return pymssql.connect(
-            server=self.host,
-            user=self.user,
-            password=self.password,
-            database=self.database,
-            port=int(self.port),
-            login_timeout=15,
-            timeout=30,
-        )
+    def __init__(self) -> None:
+        settings = get_external_db_settings()
+        self.host = settings.host or os.getenv("EXT_DB_HOST", "")
+        self.user = settings.user or os.getenv("EXT_DB_USER", "")
+        self.password = settings.password or os.getenv("EXT_DB_PASS", "")
+        self.database = settings.database or os.getenv("EXT_DB_NAME", "")
+        self.port = str(settings.port if settings.port else os.getenv("EXT_DB_PORT", "1433"))
+
+    def _connect(self):
+        """
+        Borrow a pooled SQLAlchemy connection (caller must close / use as context).
+
+        Prefer ``external_db_connection()`` or ``fetch_table_rows()`` for new code.
+        """
+        from app.external_db import get_external_db_engine
+
+        get_external_db_settings().validate()
+        return get_external_db_engine().connect()
 
     def ping_connection(self) -> dict[str, object]:
         """
-        Open one connection to SQL Server (Divar external DB) and close it.
+        Verify SQL Server (Divar external DB) via the shared pool.
         Returns a small dict suitable for Celery / monitoring (no secrets).
         """
-        try:
-            conn = self._connect()
-            try:
-                cur = conn.cursor()
-                cur.execute("SELECT 1")
-                cur.fetchone()
-            finally:
-                conn.close()
-            return {"ok": True, "host": self.host, "database": self.database, "port": int(self.port)}
-        except Exception as exc:
-            return {
-                "ok": False,
-                "error": str(exc),
-                "error_type": type(exc).__name__,
-                "host": self.host or None,
-                "database": self.database or None,
-                "port": int(self.port) if str(self.port).isdigit() else self.port,
-            }
+        return ping_external_db()
 
     def list_all_tables(self) -> list[str]:
-        query = "SELECT name FROM sys.tables ORDER BY name;"
-        connection = self._connect()
-        try:
-            cursor = connection.cursor()
-            cursor.execute(query)
-            rows = cursor.fetchall()
-            tables = [row[0] for row in rows]
-        finally:
-            connection.close()
+        query = text("SELECT name FROM sys.tables ORDER BY name;")
+
+        def _run() -> list[str]:
+            with external_db_connection() as conn:
+                rows = conn.execute(query).fetchall()
+                return [row[0] for row in rows]
+
+        tables = retry_mssql_operation(_run, operation_name="list_all_tables")
 
         print("Tables found:")
         for table_name in tables:

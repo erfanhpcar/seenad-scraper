@@ -8,7 +8,9 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.external_inspector import ExternalDbInspector
+from sqlalchemy import text
+
+from app.external_db import external_db_connection, retry_mssql_operation
 
 TARGET_TABLES = ["Divar1", "TELLS", "Divar_j4_900_150"]
 
@@ -34,40 +36,37 @@ def main() -> None:
     if missing:
         raise RuntimeError(f"Missing environment variables: {', '.join(missing)}")
 
-    inspector = ExternalDbInspector()
-    connection = inspector._connect()
-    try:
-        cursor = connection.cursor(as_dict=True)
-        for table_name in TARGET_TABLES:
-            print("=" * 80)
-            print(f"Table: {table_name}")
-            print("- Columns:")
-            cursor.execute(
-                """
-                SELECT
-                    COLUMN_NAME,
-                    DATA_TYPE
-                FROM INFORMATION_SCHEMA.COLUMNS
-                WHERE TABLE_NAME = %s
-                ORDER BY ORDINAL_POSITION
-                """,
-                (table_name,),
-            )
-            columns = cursor.fetchall()
-            if not columns:
-                print("  (table not found)")
+    def _inspect() -> None:
+        with external_db_connection() as conn:
+            for table_name in TARGET_TABLES:
+                print("=" * 80)
+                print(f"Table: {table_name}")
+                print("- Columns:")
+                columns = conn.execute(
+                    text(
+                        """
+                        SELECT COLUMN_NAME, DATA_TYPE
+                        FROM INFORMATION_SCHEMA.COLUMNS
+                        WHERE TABLE_NAME = :table_name
+                        ORDER BY ORDINAL_POSITION
+                        """
+                    ),
+                    {"table_name": table_name},
+                ).mappings()
+                column_rows = list(columns)
+                if not column_rows:
+                    print("  (table not found)")
+                    print()
+                    continue
+                for column in column_rows:
+                    print(f"  - {column['COLUMN_NAME']}: {column['DATA_TYPE']}")
                 print()
-                continue
-            for column in columns:
-                print(f"  - {column['COLUMN_NAME']}: {column['DATA_TYPE']}")
-            print()
 
-            safe_table_name = _safe_table_name(table_name)
-            cursor.execute(f"SELECT TOP 5 * FROM {safe_table_name}")
-            rows = cursor.fetchall()
-            _print_rows(table_name, rows)
-    finally:
-        connection.close()
+                safe_table_name = _safe_table_name(table_name)
+                rows = conn.execute(text(f"SELECT TOP 5 * FROM {safe_table_name}")).mappings()
+                _print_rows(table_name, [dict(row) for row in rows])
+
+    retry_mssql_operation(_inspect, operation_name="inspect_columns")
 
 
 if __name__ == "__main__":

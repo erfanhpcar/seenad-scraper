@@ -7,6 +7,7 @@ from datetime import timedelta
 
 from celery import Celery
 from celery.schedules import crontab
+from celery.signals import worker_process_init
 
 _broker = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
 _backend = os.getenv("CELERY_RESULT_BACKEND", _broker)
@@ -29,6 +30,14 @@ celery_app.conf.update(
 )
 
 celery_app.autodiscover_tasks(["app.tasks"])
+
+
+@worker_process_init.connect
+def _reset_external_db_after_fork(**_kwargs: object) -> None:
+    """Discard any SQL Server pool inherited from the Celery parent process."""
+    from app.external_db import reset_external_db_engine
+
+    reset_external_db_engine()
 
 _beat_schedule: dict[str, dict[str, object]] = {}
 

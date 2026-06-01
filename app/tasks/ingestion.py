@@ -32,6 +32,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 def _ingestion_retry_exceptions() -> tuple[type[BaseException], ...]:
+    # pymssql.OperationalError (20047 / DBPROCESS is dead) is a subclass of pymssql.Error.
     return (pymssql.Error, OSError, TimeoutError, ConnectionError)
 
 

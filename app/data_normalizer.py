@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.car_normalization import normalize_brand_model
-from app.external_inspector import ExternalDbInspector
+from app.external_db import fetch_table_rows
 from app.models import ScrapedListing
 
 TARGET_TABLES = ("Divar1", "TELLS", "Divar_j4_900_150")
@@ -97,24 +97,7 @@ def _fetch_external_rows(
     limit: int | None = None,
     since: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    inspector = ExternalDbInspector()
-    connection = inspector._connect()
-    try:
-        cursor = connection.cursor(as_dict=True)
-        if since is not None and limit is not None:
-            cursor.execute(
-                f"SELECT TOP {int(limit)} * FROM [{table_name}] WHERE [time] > %s ORDER BY [time] ASC",
-                (since,),
-            )
-        elif since is not None:
-            cursor.execute(f"SELECT * FROM [{table_name}] WHERE [time] > %s ORDER BY [time] ASC", (since,))
-        elif limit is not None:
-            cursor.execute(f"SELECT TOP {int(limit)} * FROM [{table_name}] ORDER BY [time] DESC")
-        else:
-            cursor.execute(f"SELECT * FROM [{table_name}]")
-        return cursor.fetchall()
-    finally:
-        connection.close()
+    return fetch_table_rows(table_name, limit=limit, since=since)
 
 
 def _upsert_listing(db: Session, source: str, row: dict[str, Any], *, external_table: str) -> None:

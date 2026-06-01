@@ -80,6 +80,7 @@ class BamaHierarchyItem:
     model_fa: str
     trim_slug: str
     trim_fa: str
+    price_api_raw: int
     price_irr: int
     model_year: int | None
     price_provider: str | None
@@ -495,7 +496,7 @@ def _api_raw_str(value: Any) -> str:
     return str(value)
 
 
-def _coerce_price_irr(value: Any) -> int:
+def _coerce_price_int(value: Any) -> int:
     if value is None:
         return 0
     try:
@@ -504,7 +505,22 @@ def _coerce_price_irr(value: Any) -> int:
         return 0
 
 
-def _parse_hierarchy_item(brand_bundle: Mapping[str, Any], item: Mapping[str, Any]) -> BamaHierarchyItem:
+def normalize_bama_hierarchy_price_to_irr(raw_price_toman: int) -> int:
+    """
+    Convert a Bama hierarchy ``price`` integer to Iranian Rial for ``currency='IRR'``.
+
+    The CAD hierarchy API always returns catalogue prices in Toman (no unit field on items).
+    """
+
+    if raw_price_toman <= 0:
+        return 0
+    return raw_price_toman * 10
+
+
+def _parse_hierarchy_item(
+    brand_bundle: Mapping[str, Any],
+    item: Mapping[str, Any],
+) -> BamaHierarchyItem:
     brand_slug_val = _api_raw_str(item.get("brand") or brand_bundle.get("brand"))
     brand_fa_val = _api_raw_str(item.get("brand_fa") or brand_bundle.get("brand_fa"))
     model_slug_val = _api_raw_str(item.get("model"))
@@ -514,6 +530,8 @@ def _parse_hierarchy_item(brand_bundle: Mapping[str, Any], item: Mapping[str, An
     price_raw = _api_raw_str(item.get("price"))
     model_year_raw = _api_raw_str(item.get("model_year"))
     price_provider = item.get("price_provider") if item.get("price_provider") else None
+    price_api_raw = _coerce_price_int(item.get("price"))
+    price_irr = normalize_bama_hierarchy_price_to_irr(price_api_raw)
     return BamaHierarchyItem(
         brand_slug=brand_slug_val,
         brand_fa=brand_fa_val,
@@ -521,7 +539,8 @@ def _parse_hierarchy_item(brand_bundle: Mapping[str, Any], item: Mapping[str, An
         model_fa=model_fa_val,
         trim_slug=trim_slug_val,
         trim_fa=trim_fa_val,
-        price_irr=_coerce_price_irr(item.get("price")),
+        price_api_raw=price_api_raw,
+        price_irr=price_irr,
         model_year=_optional_int(item.get("model_year")),
         price_provider=price_provider,
         bama_car_price_id=_optional_int(item.get("car_price_id")),
@@ -618,7 +637,15 @@ def upsert_car_zero_price(
     scrape_batch_id: str | None = None,
 ) -> None:
     price_decimal = Decimal(price_irr)
-    snap = clipped_json_snapshot(raw_snapshot) if raw_snapshot is not None else None
+    snap_base: dict[str, Any] | None
+    if raw_snapshot is not None:
+        try:
+            snap_base = dict(raw_snapshot)
+        except (TypeError, ValueError):
+            snap_base = None
+    else:
+        snap_base = None
+    snap = clipped_json_snapshot(snap_base) if snap_base is not None else None
 
     stmt = pg_insert(CarZeroPrice).values(
         car_reference_id=car_reference_id,
@@ -798,6 +825,9 @@ def run_bama_zero_price_pipeline(
                 )
                 if dry_run:
                     continue
+                enriched_snapshot: dict[str, Any] = dict(item.raw)
+                enriched_snapshot["price_api_raw_toman"] = item.price_api_raw
+                enriched_snapshot["price_normalized_irr"] = item.price_irr
                 upsert_car_zero_price(
                     db,
                     car_reference_id=decision.car_reference_id,
@@ -805,7 +835,7 @@ def run_bama_zero_price_pipeline(
                     model_year=item.model_year,
                     price_provider=item.price_provider,
                     bama_car_price_id=item.bama_car_price_id,
-                    raw_snapshot=item.raw,
+                    raw_snapshot=enriched_snapshot,
                     scrape_batch_id=persist_batch,
                 )
                 upserted += 1

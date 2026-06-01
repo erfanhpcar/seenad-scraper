@@ -6,6 +6,7 @@ services:
   redis:
     image: docker.arvancloud.ir/redis:7-alpine
     container_name: seenad_redis
+    restart: unless-stopped
     ports:
       - "6379:6379"
     command: ["redis-server", "--appendonly", "yes"]
@@ -18,6 +19,7 @@ services:
   db:
     image: docker.arvancloud.ir/postgres:16
     container_name: seenad_db
+    restart: unless-stopped
     command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
@@ -42,6 +44,7 @@ services:
       dockerfile: Dockerfile
       extra_hosts: *runflare_hosts
     container_name: seenad_backend
+    restart: unless-stopped
     working_dir: /app
     extra_hosts:
       - "mirror-linux.runflare.com:185.126.10.222"
@@ -81,6 +84,7 @@ services:
       dockerfile: Dockerfile
       extra_hosts: *runflare_hosts
     container_name: seenad_worker
+    restart: unless-stopped
     working_dir: /app
     extra_hosts:
       - "mirror-linux.runflare.com:185.126.10.222"
@@ -119,6 +123,7 @@ services:
       dockerfile: Dockerfile
       extra_hosts: *runflare_hosts
     container_name: seenad_beat
+    restart: unless-stopped
     working_dir: /app
     extra_hosts:
       - "mirror-linux.runflare.com:185.126.10.222"
