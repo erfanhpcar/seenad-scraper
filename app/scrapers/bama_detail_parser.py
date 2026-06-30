@@ -16,6 +16,7 @@ from urllib.parse import unquote, urlparse
 import requests
 from bs4 import BeautifulSoup
 
+from app.body_condition import normalize_body_condition_raw
 from app.scrapers.bama_scraper import (
     USER_AGENTS,
     _extract_external_id,
@@ -605,6 +606,57 @@ def _trim_text_implies_gearbox(tx: str) -> bool:
     return any(h in tx or h in lowered for h in gearbox_hints)
 
 
+def _body_status_from_nuxt_vehicle(vehicle: dict[str, Any]) -> tuple[str | None, str | None]:
+    body_status = vehicle.get("bodyStatus")
+    if isinstance(body_status, dict):
+        for key in ("value", "text"):
+            raw = body_status.get(key)
+            if isinstance(raw, str) and raw.strip():
+                normalized = normalize_body_condition_raw(raw)
+                if normalized:
+                    return normalized, f"vehicle.bodyStatus.{key}"
+    return None, None
+
+
+def _body_status_from_nuxt_inner(inner: dict[str, Any]) -> tuple[str | None, str | None]:
+    veh = _extract_vehicle_bundle(inner)
+    value, path = _body_status_from_nuxt_vehicle(veh)
+    if value:
+        return value, path
+
+    specs = veh.get("specs") if isinstance(veh.get("specs"), dict) else {}
+    details = specs.get("details") if isinstance(specs.get("details"), dict) else {}
+    for key in ("bodyStatus", "body_status", "bodyCondition", "body_condition"):
+        blob = details.get(key)
+        if isinstance(blob, dict):
+            for sub_key in ("value", "text"):
+                raw = blob.get(sub_key)
+                if isinstance(raw, str) and raw.strip():
+                    normalized = normalize_body_condition_raw(raw)
+                    if normalized:
+                        return normalized, f"vehicle.specs.details.{key}.{sub_key}"
+        elif isinstance(blob, str) and blob.strip():
+            normalized = normalize_body_condition_raw(blob)
+            if normalized:
+                return normalized, f"vehicle.specs.details.{key}"
+    return None, None
+
+
+def _body_status_from_visible_html(html: str) -> tuple[str | None, str | None]:
+    text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
+    for pattern in (
+        r"وضعیت بدنه\s*[:：]?\s*([^\n\r|]+?)(?=\s*(?:رنگ بدنه|رنگ داخل|گیربکس|کارکرد|شهر|توضیح|$))",
+        r"وضعیت بدنه\s*[:：]?\s*([^\n\r|]+)",
+    ):
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        normalized = normalize_body_condition_raw(match.group(1))
+        if normalized:
+            return normalized, "html:text:وضعیت بدنه"
+    return None, None
+
+
 def _gearbox_label_from_nuxt_vehicle(vehicle: dict[str, Any]) -> str | None:
     specs = vehicle.get("specs") if isinstance(vehicle.get("specs"), dict) else {}
     details = specs.get("details") if isinstance(specs.get("details"), dict) else {}
@@ -782,6 +834,8 @@ class BamaDetailExtract:
     price_is_negotiable: bool = False
     price_debug_note: str = ""
     created_at_source: str | None = None
+    body_condition: str | None = None
+    body_condition_source_path: str | None = None
 
 
 def _dynamic_referer(listing_url: str) -> str:
@@ -1413,13 +1467,28 @@ def parse_bama_listing_from_html(html: str, listing_url: str) -> BamaDetailExtra
     merged = _merge_nuxt_regex_into_extract(html, base, nuxt_inner, price_source=price_source)
     merged = replace(merged, created_at_source=created_at_source)
 
+    body_condition: str | None = None
+    body_condition_source_path: str | None = None
+    if nuxt_inner:
+        body_condition, body_condition_source_path = _body_status_from_nuxt_inner(nuxt_inner)
+    if body_condition is None:
+        body_condition, body_condition_source_path = _body_status_from_visible_html(html)
+    merged = replace(
+        merged,
+        body_condition=body_condition,
+        body_condition_source_path=body_condition_source_path,
+    )
+
     LOGGER.info(
-        "bama_detail_parser merged external_id=%r price=%s negotiable=%s city=%r mileage=%s note=%r",
+        "bama_detail_parser merged external_id=%r price=%s negotiable=%s city=%r mileage=%s "
+        "body_condition=%r body_path=%r note=%r",
         merged.external_id,
         merged.price,
         merged.price_is_negotiable,
         merged.city,
         merged.mileage,
+        merged.body_condition,
+        merged.body_condition_source_path,
         merged.price_debug_note,
     )
 

@@ -14,14 +14,14 @@ from sqlalchemy.orm import Session
 from celery import chain
 from celery.exceptions import Ignore
 
+from app.body_condition import merge_body_condition_into_payload
 from app.celery_app import celery_app
 from app.data_normalizer import run_ingestion
 from app.database import SessionLocal
-from app.listing_normalization import run_color_gearbox_normalization
-from app.models import CarEntity, ScrapedListing
+from app.models import ScrapedListing
 from app.scrapers.bama_detail_parser import BamaDetailExtract, fetch_and_parse_bama_listing
-from app.scrapers.hm_scraper import HMDetailExtract, HMParseIntegrityError, fetch_and_parse_hm_listing
-from app.scrapers.karnameh_scraper import KNDetailExtract, KNParseIntegrityError, fetch_and_parse_kn_listing
+from app.scrapers.hm_scraper import HMDetailExtract, fetch_and_parse_hm_listing
+from app.scrapers.karnameh_scraper import KNDetailExtract, fetch_and_parse_kn_listing
 from app.tasks.normalization import (
     divar_mapping_relink_task,
     normalization_task,
@@ -49,8 +49,6 @@ def _bama_retry_exceptions() -> tuple[type[BaseException], ...]:
         TimeoutError,
         ConnectionError,
         OperationalError,
-        HMParseIntegrityError,
-        KNParseIntegrityError,
     )
 
 
@@ -70,16 +68,6 @@ def _handle_status_circuit_breaker(task, *, input_url: str, exc: requests.HTTPEr
             input_url,
         )
         raise Ignore()
-
-
-def _canonical_reference_part(value: str | None, max_len: int, fallback: str) -> str:
-    raw = (value or "").strip()
-    if not raw:
-        raw = fallback
-    collapsed = re.sub(r"\s+", " ", raw).strip()
-    if not collapsed:
-        collapsed = fallback
-    return collapsed[:max_len]
 
 
 def _truncate_db_field(value: str | None, max_len: int) -> str | None:
@@ -142,54 +130,6 @@ def _pop_next_kn_url() -> str | None:
     return static_url or None
 
 
-def _ensure_car_reference_row(
-    db: Session,
-    brand: str | None,
-    model: str | None,
-    trim: str | None,
-    source_url: str,
-) -> CarEntity:
-    brand_fb = _canonical_reference_part(brand, 100, "unknown")
-    model_fb = _canonical_reference_part(model, 120, brand_fb)
-    trim_fb = _canonical_reference_part(trim, 160, model_fb)
-
-    existing = db.scalar(
-        select(CarEntity).where(
-            CarEntity.brand == brand_fb,
-            CarEntity.model == model_fb,
-            CarEntity.trim == trim_fb,
-        )
-    )
-    if existing:
-        return existing
-
-    safe_url = (source_url or "")[:300] or "https://bama.ir/"
-    row = CarEntity(
-        brand=brand_fb,
-        model=model_fb,
-        trim=trim_fb,
-        production_year_start=None,
-        production_year_end=None,
-        source_url=safe_url,
-    )
-    db.add(row)
-    try:
-        db.flush()
-        return row
-    except IntegrityError:
-        db.rollback()
-        recovered = db.scalar(
-            select(CarEntity).where(
-                CarEntity.brand == brand_fb,
-                CarEntity.model == model_fb,
-                CarEntity.trim == trim_fb,
-            )
-        )
-        if recovered is None:
-            raise
-        return recovered
-
-
 def _validate_bama_extract_for_persist(extract: BamaDetailExtract) -> None:
     """
     scraped_listings.external_id is NOT NULL.
@@ -223,15 +163,31 @@ def _build_bama_raw_payload(extract: BamaDetailExtract) -> dict[str, object]:
         "mileage": extract.mileage,
         "description": extract.description,
         "images": list(extract.images),
+        "city": extract.city,
+        "color": extract.color,
+        "gearbox": extract.transmission,
+        "transmission": extract.transmission,
+        "price_is_negotiable": extract.price_is_negotiable,
+        "price_debug_note": extract.price_debug_note,
     }
-    if extract.city:
-        payload["city"] = extract.city
-    if extract.color:
-        payload["color"] = extract.color
-    if extract.transmission:
-        payload["gearbox"] = extract.transmission
-        payload["transmission"] = extract.transmission
-    return {key: val for key, val in payload.items() if val not in (None, "")}
+    return merge_body_condition_into_payload(
+        payload,
+        source="bama",
+        raw=extract.body_condition,
+        source_path=extract.body_condition_source_path,
+    )
+
+
+def _hm_has_parse_error(extract: HMDetailExtract) -> bool:
+    if not (extract.external_id or "").strip():
+        return True
+    if not (extract.brand or "").strip() or not (extract.model or "").strip():
+        return True
+    if extract.price is None:
+        return True
+    if extract.mileage is None or extract.mileage < 0:
+        return True
+    return False
 
 
 def _validate_hm_extract_for_persist(extract: HMDetailExtract) -> None:
@@ -239,17 +195,15 @@ def _validate_hm_extract_for_persist(extract: HMDetailExtract) -> None:
     if not ext:
         LOGGER.error("HM persist validation failed: external_id empty. listing_url=%s", extract.listing_url)
         raise ValueError("hm extract has no external_id — cannot insert into scraped_listings")
-    if not (extract.brand or "").strip() or not (extract.model or "").strip():
-        raise HMParseIntegrityError(
-            f"hm extract missing brand/model from __NEXT_DATA__ (external_id={ext!r} url={extract.listing_url})"
-        )
-    if extract.price is None:
-        raise HMParseIntegrityError(
-            f"hm extract missing numeric price (external_id={ext!r} url={extract.listing_url} note={extract.price_debug_note!r})"
-        )
-    if extract.mileage is None or extract.mileage < 0:
-        raise HMParseIntegrityError(
-            f"hm extract missing/invalid mileage (external_id={ext!r} url={extract.listing_url})"
+    if _hm_has_parse_error(extract):
+        LOGGER.warning(
+            "HM persist with parse_error=true external_id=%r url=%s brand=%r model=%r price=%s mileage=%s",
+            ext,
+            extract.listing_url,
+            extract.brand,
+            extract.model,
+            extract.price,
+            extract.mileage,
         )
 
 
@@ -262,13 +216,18 @@ def _build_hm_raw_payload(extract: HMDetailExtract) -> dict[str, object]:
         "trim": extract.trim,
         "year": extract.year,
         "mileage": extract.mileage,
-        "body_condition": extract.body_condition,
         "description": extract.description,
         "images": list(extract.images),
+        "city": extract.city,
+        "price_debug_note": extract.price_debug_note,
+        "parse_error": _hm_has_parse_error(extract),
     }
-    if extract.city:
-        payload["city"] = extract.city
-    return {key: val for key, val in payload.items() if val not in (None, "")}
+    return merge_body_condition_into_payload(
+        payload,
+        source="hm",
+        raw=extract.body_condition,
+        source_path=extract.body_condition_source_path,
+    )
 
 
 def _is_noisy_text(value: str | None) -> bool:
@@ -283,22 +242,13 @@ def _is_noisy_text(value: str | None) -> bool:
     return len(alnum) < 2
 
 
-def _validate_kn_extract_with_content_guard(extract: KNDetailExtract) -> None:
-    ext = (extract.external_id or "").strip()
-    if not ext:
-        LOGGER.error("KN content guard failed: empty external_id. listing_url=%s", extract.listing_url)
-        raise ValueError("kn extract has no external_id — cannot insert into scraped_listings")
-
+def _kn_has_parse_error(extract: KNDetailExtract) -> bool:
+    if not (extract.external_id or "").strip():
+        return True
     if extract.price is None:
-        raise KNParseIntegrityError(
-            f"kn extract missing numeric expert price (external_id={ext!r} url={extract.listing_url} note={extract.price_debug_note!r})"
-        )
-
+        return True
     if _is_noisy_text(extract.brand) or _is_noisy_text(extract.model):
-        raise KNParseIntegrityError(
-            f"kn content guard rejected noisy brand/model (external_id={ext!r} brand={extract.brand!r} model={extract.model!r})"
-        )
-
+        return True
     useful_fields = [
         extract.trim,
         extract.body_condition,
@@ -309,8 +259,24 @@ def _validate_kn_extract_with_content_guard(extract: KNDetailExtract) -> None:
     ]
     informative = [field for field in useful_fields if not _is_noisy_text(field)]
     if not informative and not extract.images:
-        raise KNParseIntegrityError(
-            f"kn content guard rejected null/noisy record (external_id={ext!r} url={extract.listing_url})"
+        return True
+    return False
+
+
+def _validate_kn_extract_with_content_guard(extract: KNDetailExtract) -> None:
+    ext = (extract.external_id or "").strip()
+    if not ext:
+        LOGGER.error("KN content guard failed: empty external_id. listing_url=%s", extract.listing_url)
+        raise ValueError("kn extract has no external_id — cannot insert into scraped_listings")
+
+    if _kn_has_parse_error(extract):
+        LOGGER.warning(
+            "KN persist with parse_error=true external_id=%r url=%s brand=%r model=%r price=%s",
+            ext,
+            extract.listing_url,
+            extract.brand,
+            extract.model,
+            extract.price,
         )
 
 
@@ -323,16 +289,21 @@ def _build_kn_raw_payload(extract: KNDetailExtract) -> dict[str, object]:
         "trim": extract.trim,
         "year": extract.year,
         "mileage": extract.mileage,
-        "body_condition": extract.body_condition,
         "description": extract.description,
         "images": list(extract.images),
+        "city": extract.city,
+        "price_debug_note": extract.price_debug_note,
+        "parse_error": _kn_has_parse_error(extract),
     }
-    if extract.city:
-        payload["city"] = extract.city
-    return {key: val for key, val in payload.items() if val not in (None, "")}
+    return merge_body_condition_into_payload(
+        payload,
+        source="karnameh",
+        raw=extract.body_condition,
+        source_path=extract.body_condition_source_path,
+    )
 
 
-def _upsert_bama_scraped_listing(db: Session, extract: BamaDetailExtract, car_reference_id: int) -> ScrapedListing:
+def _upsert_bama_scraped_listing(db: Session, extract: BamaDetailExtract) -> ScrapedListing:
     incoming_raw = _build_bama_raw_payload(extract)
 
     record = db.scalar(
@@ -356,7 +327,6 @@ def _upsert_bama_scraped_listing(db: Session, extract: BamaDetailExtract, car_re
         record.model_name = _truncate_db_field(extract.model, 120)
         record.model_year = extract.year
         record.trim_name = _truncate_db_field(extract.trim, 120)
-        record.car_reference_id = car_reference_id
         record.created_at_source = extract.created_at_source
         record.raw_data = merged_raw
         return record
@@ -372,7 +342,6 @@ def _upsert_bama_scraped_listing(db: Session, extract: BamaDetailExtract, car_re
         model_name=_truncate_db_field(extract.model, 120),
         model_year=extract.year,
         trim_name=_truncate_db_field(extract.trim, 120),
-        car_reference_id=car_reference_id,
         created_at_source=extract.created_at_source,
         raw_data=incoming_raw,
     )
@@ -380,7 +349,7 @@ def _upsert_bama_scraped_listing(db: Session, extract: BamaDetailExtract, car_re
     return listing
 
 
-def _upsert_hm_scraped_listing(db: Session, extract: HMDetailExtract, car_reference_id: int) -> ScrapedListing:
+def _upsert_hm_scraped_listing(db: Session, extract: HMDetailExtract) -> ScrapedListing:
     incoming_raw = _build_hm_raw_payload(extract)
     hm_source = "hamrah-mechanic"
     record = db.scalar(
@@ -400,7 +369,6 @@ def _upsert_hm_scraped_listing(db: Session, extract: HMDetailExtract, car_refere
         record.model_name = _truncate_db_field(extract.model, 120)
         record.model_year = extract.year
         record.trim_name = _truncate_db_field(extract.trim, 120)
-        record.car_reference_id = car_reference_id
         record.created_at_source = extract.created_at_source
         record.raw_data = merged_raw
         return record
@@ -416,7 +384,6 @@ def _upsert_hm_scraped_listing(db: Session, extract: HMDetailExtract, car_refere
         model_name=_truncate_db_field(extract.model, 120),
         model_year=extract.year,
         trim_name=_truncate_db_field(extract.trim, 120),
-        car_reference_id=car_reference_id,
         created_at_source=extract.created_at_source,
         raw_data=incoming_raw,
     )
@@ -424,7 +391,7 @@ def _upsert_hm_scraped_listing(db: Session, extract: HMDetailExtract, car_refere
     return listing
 
 
-def _upsert_kn_scraped_listing(db: Session, extract: KNDetailExtract, car_reference_id: int) -> ScrapedListing:
+def _upsert_kn_scraped_listing(db: Session, extract: KNDetailExtract) -> ScrapedListing:
     incoming_raw = _build_kn_raw_payload(extract)
     kn_source = "karnameh"
     record = db.scalar(
@@ -444,7 +411,6 @@ def _upsert_kn_scraped_listing(db: Session, extract: KNDetailExtract, car_refere
         record.model_name = _truncate_db_field(extract.model, 120)
         record.model_year = extract.year
         record.trim_name = _truncate_db_field(extract.trim, 120)
-        record.car_reference_id = car_reference_id
         record.created_at_source = extract.created_at_source
         record.raw_data = merged_raw
         return record
@@ -460,7 +426,6 @@ def _upsert_kn_scraped_listing(db: Session, extract: KNDetailExtract, car_refere
         model_name=_truncate_db_field(extract.model, 120),
         model_year=extract.year,
         trim_name=_truncate_db_field(extract.trim, 120),
-        car_reference_id=car_reference_id,
         created_at_source=extract.created_at_source,
         raw_data=incoming_raw,
     )
@@ -491,7 +456,7 @@ def ingestion_task(self) -> int:
     incremental = os.getenv("NORMALIZER_INCREMENTAL", "1").strip().lower() not in {"0", "false", "no"}
     total = run_ingestion(limit_per_table=limit, incremental=incremental)
 
-    chain_enabled = os.getenv("DIVAR_PIPELINE_CHAIN", "1").strip().lower() not in {"0", "false", "no"}
+    chain_enabled = os.getenv("DIVAR_PIPELINE_CHAIN", "0").strip().lower() not in {"0", "false", "no"}
     if chain_enabled:
         chain(
             normalization_task.si(),
@@ -518,10 +483,7 @@ def ingestion_task(self) -> int:
     name="tasks.bama_ingestion_task",
 )
 def bama_ingestion_task(self, url: str) -> dict[str, object]:
-    """
-    Fetch one Bama listing URL, parse __INITIAL_STATE__, upsert scraped_listings (source=bama),
-    and ensure car_reference exists for brand/model/trim.
-    """
+    """Fetch one Bama listing URL, parse detail HTML, upsert scraped_listings (source=bama, raw only)."""
     input_url = (url or "").strip()
     task_id = getattr(self.request, "id", None)
     LOGGER.info("bama_ingestion_task INPUT_URL=%s task_id=%s", input_url, task_id)
@@ -562,20 +524,12 @@ def bama_ingestion_task(self, url: str) -> dict[str, object]:
     )
     _validate_bama_extract_for_persist(extract)
 
-    ref_id: int | None = None
     listing_id: int | None = None
     scraped_at_snapshot = None
 
     with SessionLocal() as db:
         try:
-            ref = _ensure_car_reference_row(db, extract.brand, extract.model, extract.trim, extract.listing_url)
-            ref_id = ref.id
-            LOGGER.info(
-                "bama_ingestion_task car_reference ready id=%s brand/model/trim canonical snapshot ok",
-                ref_id,
-            )
-
-            listing_row = _upsert_bama_scraped_listing(db, extract, ref.id)
+            listing_row = _upsert_bama_scraped_listing(db, extract)
             db.flush()
             listing_id = getattr(listing_row, "id", None)
             LOGGER.info(
@@ -591,10 +545,9 @@ def bama_ingestion_task(self, url: str) -> dict[str, object]:
             scraped_at_snapshot = getattr(listing_row, "scraped_at", None)
             LOGGER.info(
                 "bama_ingestion_task SUCCESS persisted scraped_listing_id=%s external_id=%r "
-                "car_reference_id=%s scraped_at=%s INPUT_URL=%s",
+                "scraped_at=%s INPUT_URL=%s",
                 listing_id,
                 extract.external_id,
-                ref_id,
                 scraped_at_snapshot,
                 input_url,
             )
@@ -628,28 +581,9 @@ def bama_ingestion_task(self, url: str) -> dict[str, object]:
             db.rollback()
             raise
 
-    assert ref_id is not None
-
-    # Separate session/transaction — failures here must not undo the persisted listing row above.
-    try:
-        color_rows, gearbox_rows = run_color_gearbox_normalization()
-        LOGGER.info(
-            "bama_ingestion_task listing_normalization updated rows color=%s gearbox=%s scraped_listing_id=%s",
-            color_rows,
-            gearbox_rows,
-            listing_id,
-        )
-    except Exception:
-        LOGGER.exception(
-            "bama_ingestion_task listing_normalization failed (listing already committed) external_id=%r scraped_listing_id=%s",
-            extract.external_id,
-            listing_id,
-        )
-
     return {
         "status": "ok",
         "external_id": extract.external_id,
-        "car_reference_id": ref_id,
         "scraped_listing_id": listing_id,
         "url": extract.listing_url,
         "scraped_at": scraped_at_snapshot.isoformat() if scraped_at_snapshot else None,
@@ -718,15 +652,12 @@ def hm_ingestion_task(self, url: str) -> dict[str, object]:
     )
     _validate_hm_extract_for_persist(extract)
 
-    ref_id: int | None = None
     listing_id: int | None = None
     scraped_at_snapshot = None
 
     with SessionLocal() as db:
         try:
-            ref = _ensure_car_reference_row(db, extract.brand, extract.model, extract.trim, extract.listing_url)
-            ref_id = ref.id
-            listing_row = _upsert_hm_scraped_listing(db, extract, ref.id)
+            listing_row = _upsert_hm_scraped_listing(db, extract)
             db.flush()
             listing_id = getattr(listing_row, "id", None)
 
@@ -735,10 +666,10 @@ def hm_ingestion_task(self, url: str) -> dict[str, object]:
             listing_id = listing_row.id
             scraped_at_snapshot = getattr(listing_row, "scraped_at", None)
             LOGGER.info(
-                "hm_ingestion_task SUCCESS persisted scraped_listing_id=%s external_id=%r car_reference_id=%s scraped_at=%s INPUT_URL=%s",
+                "hm_ingestion_task SUCCESS persisted scraped_listing_id=%s external_id=%r parse_error=%s scraped_at=%s INPUT_URL=%s",
                 listing_id,
                 extract.external_id,
-                ref_id,
+                _hm_has_parse_error(extract),
                 scraped_at_snapshot,
                 input_url,
             )
@@ -774,8 +705,8 @@ def hm_ingestion_task(self, url: str) -> dict[str, object]:
     return {
         "status": "ok",
         "external_id": extract.external_id,
-        "car_reference_id": ref_id,
         "scraped_listing_id": listing_id,
+        "parse_error": _hm_has_parse_error(extract),
         "url": extract.listing_url,
         "scraped_at": scraped_at_snapshot.isoformat() if scraped_at_snapshot else None,
     }
@@ -843,15 +774,12 @@ def kn_ingestion_task(self, url: str) -> dict[str, object]:
     )
     _validate_kn_extract_with_content_guard(extract)
 
-    ref_id: int | None = None
     listing_id: int | None = None
     scraped_at_snapshot = None
 
     with SessionLocal() as db:
         try:
-            ref = _ensure_car_reference_row(db, extract.brand, extract.model, extract.trim, extract.listing_url)
-            ref_id = ref.id
-            listing_row = _upsert_kn_scraped_listing(db, extract, ref.id)
+            listing_row = _upsert_kn_scraped_listing(db, extract)
             db.flush()
             listing_id = getattr(listing_row, "id", None)
 
@@ -860,10 +788,10 @@ def kn_ingestion_task(self, url: str) -> dict[str, object]:
             listing_id = listing_row.id
             scraped_at_snapshot = getattr(listing_row, "scraped_at", None)
             LOGGER.info(
-                "kn_ingestion_task SUCCESS persisted scraped_listing_id=%s external_id=%r car_reference_id=%s scraped_at=%s INPUT_URL=%s",
+                "kn_ingestion_task SUCCESS persisted scraped_listing_id=%s external_id=%r parse_error=%s scraped_at=%s INPUT_URL=%s",
                 listing_id,
                 extract.external_id,
-                ref_id,
+                _kn_has_parse_error(extract),
                 scraped_at_snapshot,
                 input_url,
             )
@@ -899,8 +827,8 @@ def kn_ingestion_task(self, url: str) -> dict[str, object]:
     return {
         "status": "ok",
         "external_id": extract.external_id,
-        "car_reference_id": ref_id,
         "scraped_listing_id": listing_id,
+        "parse_error": _kn_has_parse_error(extract),
         "url": extract.listing_url,
         "scraped_at": scraped_at_snapshot.isoformat() if scraped_at_snapshot else None,
     }

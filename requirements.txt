@@ -1,12 +1,17 @@
 fastapi
 uvicorn[standard]
 sqlalchemy
+alembic
 psycopg2-binary
 pydantic-settings
 pymssql
 requests
+httpx
 jdatetime
 beautifulsoup4
 celery[redis]
 redis
 rapidfuzz
+pandas
+openpyxl
+pdfplumber

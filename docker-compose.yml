@@ -160,6 +160,7 @@ services:
       BAMA_INGESTION_BEAT_ENABLED: "1"
       BAMA_DISCOVERY_INTERVAL_SECONDS: "300"
       BAMA_DISCOVERY_BEAT_ENABLED: "1"
+      MAPPING_PIPELINE_BEAT_ENABLED: "0"
       PIP_INDEX_URL: https://mirror-pypi.runflare.com/simple
     depends_on:
       db:

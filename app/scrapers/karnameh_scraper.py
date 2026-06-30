@@ -17,6 +17,7 @@ import requests
 from bs4 import BeautifulSoup
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 
+from app.body_condition import normalize_body_condition_raw
 from app.scrapers.bama_scraper import _extract_external_id
 from app.scrapers.hm_scraper import _classify_request_error, _to_iso8601_timestamp
 
@@ -73,6 +74,7 @@ class KNDetailExtract:
     listing_url: str
     created_at_source: str | None = None
     price_debug_note: str = ""
+    body_condition_source_path: str | None = None
 
 
 class KNParseIntegrityError(RuntimeError):
@@ -266,9 +268,8 @@ def _extract_price_decimal(next_data: dict[str, Any] | None, text: str) -> tuple
     return None, ""
 
 
-def _extract_body_condition(next_data: dict[str, Any] | None, text: str) -> str | None:
+def _extract_body_condition(next_data: dict[str, Any] | None, text: str) -> tuple[str | None, str | None]:
     if next_data:
-        chunks: list[str] = []
         lbl = _extract_labeled_value(
             next_data,
             (
@@ -281,39 +282,51 @@ def _extract_body_condition(next_data: dict[str, Any] | None, text: str) -> str 
             ),
         )
         if lbl:
-            chunks.append(lbl)
+            normalized = normalize_body_condition_raw(lbl)
+            if normalized:
+                return normalized, "label:وضعیت بدنه"
 
-        signal_tokens = ("body", "color", "paint", "scratch", "damage")
+        priority_keys = (
+            "body_status",
+            "bodyStatus",
+            "bodyCondition",
+            "body_condition",
+            "colorStatus",
+            "paintStatus",
+            "scratchStatus",
+            "damageStatus",
+        )
         for node in _iter_dict_nodes(next_data):
-            for key in (
-                "bodyCondition",
-                "body_condition",
-                "bodyStatus",
-                "body_status",
-                "colorStatus",
-                "paintStatus",
-                "scratchStatus",
-                "damageStatus",
-            ):
+            for key in priority_keys:
                 raw = node.get(key)
                 if isinstance(raw, str) and raw.strip():
-                    chunks.append(raw.strip())
-            # Keep only values that are attached to body/expert-report keys.
+                    normalized = normalize_body_condition_raw(raw)
+                    if normalized:
+                        return normalized, f"__NEXT_DATA__.{key}"
+
+        signal_tokens = ("body", "color", "paint", "scratch", "damage")
+        chunks: list[tuple[str, str]] = []
+        for node in _iter_dict_nodes(next_data):
             for key, value in node.items():
                 key_norm = str(key).strip().lower()
                 if not any(token in key_norm for token in signal_tokens):
                     continue
                 if isinstance(value, str) and value.strip():
-                    chunks.append(value.strip())
+                    normalized = normalize_body_condition_raw(value)
+                    if normalized:
+                        chunks.append((normalized, f"__NEXT_DATA__.{key}"))
 
-        unique = list(dict.fromkeys(c for c in chunks if c and c.strip()))
-        if unique:
-            return " | ".join(unique[:12])
+        if chunks:
+            unique_values = list(dict.fromkeys(chunk[0] for chunk in chunks))
+            primary_path = chunks[0][1]
+            return " | ".join(unique_values[:12]), primary_path
 
     body_match = re.search(r"وضعیت بدنه\s*[:：]?\s*([^\n\r|]+)", text)
     if body_match:
-        return body_match.group(1).strip()
-    return None
+        normalized = normalize_body_condition_raw(body_match.group(1))
+        if normalized:
+            return normalized, "html:text:وضعیت بدنه"
+    return None, None
 
 
 def _extract_created_at_source(html: str, next_data: dict[str, Any] | None, listing_url: str) -> str | None:
@@ -404,7 +417,7 @@ def _extract_kn_fields(html: str, listing_url: str, next_data: dict[str, Any] | 
         if m_match:
             mileage = _extract_int(m_match.group(1))
 
-    body_condition = _extract_body_condition(next_data, text)
+    body_condition, body_condition_source_path = _extract_body_condition(next_data, text)
     price, price_note = _extract_price_decimal(next_data, text)
     created_at_source = _extract_created_at_source(html, next_data, listing_url)
     external_id = _extract_external_id(listing_url, fallback="").strip() or "unknown"
@@ -424,6 +437,7 @@ def _extract_kn_fields(html: str, listing_url: str, next_data: dict[str, Any] | 
         listing_url=listing_url,
         created_at_source=created_at_source,
         price_debug_note=price_note,
+        body_condition_source_path=body_condition_source_path,
     )
 
 
@@ -539,12 +553,19 @@ def parse_kn_listing_from_html(html: str, listing_url: str) -> KNDetailExtract:
     extract = _extract_kn_fields(html, listing_url, next_data)
 
     if not extract.brand or not extract.model:
-        raise KNParseIntegrityError(
-            f"KN parse integrity failed (missing brand/model) external_id={extract.external_id!r} url={listing_url}"
+        LOGGER.warning(
+            "kn_scraper incomplete brand/model external_id=%r url=%s brand=%r model=%r",
+            extract.external_id,
+            listing_url,
+            extract.brand,
+            extract.model,
         )
     if extract.price is None:
-        raise KNParseIntegrityError(
-            f"KN parse integrity failed (missing numeric expert price) external_id={extract.external_id!r} url={listing_url}"
+        LOGGER.warning(
+            "kn_scraper missing numeric expert price external_id=%r url=%s note=%r",
+            extract.external_id,
+            listing_url,
+            extract.price_debug_note,
         )
     return extract
 

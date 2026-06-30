@@ -18,6 +18,7 @@ import requests
 from bs4 import BeautifulSoup
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 
+from app.body_condition import normalize_body_condition_raw
 from app.scrapers.bama_scraper import _extract_external_id
 
 LOGGER = logging.getLogger(__name__)
@@ -110,6 +111,7 @@ class HMDetailExtract:
     listing_url: str
     created_at_source: str | None = None
     price_debug_note: str = ""
+    body_condition_source_path: str | None = None
 
 
 class HMParseIntegrityError(RuntimeError):
@@ -395,17 +397,21 @@ def _extract_next_data_mileage(next_data: dict[str, Any]) -> int | None:
     return None
 
 
-def _extract_next_data_body_condition(next_data: dict[str, Any]) -> str | None:
+def _extract_next_data_body_condition(next_data: dict[str, Any]) -> tuple[str | None, str | None]:
     body = _extract_labeled_value(next_data, ("وضعیت بدنه",))
     if body:
-        return body
+        normalized = normalize_body_condition_raw(body)
+        if normalized:
+            return normalized, "label:وضعیت بدنه"
 
     for node in _iter_dict_nodes(next_data):
         for key in ("bodyCondition", "body_condition", "bodyStatus", "body_status"):
             raw = node.get(key)
             if isinstance(raw, str) and raw.strip():
-                return raw.strip()
-    return None
+                normalized = normalize_body_condition_raw(raw)
+                if normalized:
+                    return normalized, f"__NEXT_DATA__.{key}"
+    return None, None
 
 
 def _extract_next_data(html: str) -> dict[str, Any] | None:
@@ -501,6 +507,7 @@ def _extract_hm_fields(html: str, listing_url: str, next_data: dict[str, Any] | 
     mileage = None
     city = None
     body_condition = None
+    body_condition_source_path: str | None = None
     description = None
     trim = None
     images: tuple[str, ...] = tuple()
@@ -511,7 +518,7 @@ def _extract_hm_fields(html: str, listing_url: str, next_data: dict[str, Any] | 
         model = nd_model or model
         trim = nd_trim or trim
         mileage = _extract_next_data_mileage(next_data) or mileage
-        body_condition = _extract_next_data_body_condition(next_data) or body_condition
+        body_condition, body_condition_source_path = _extract_next_data_body_condition(next_data)
 
         for node in _iter_dict_nodes(next_data):
             if year is None:
@@ -530,7 +537,9 @@ def _extract_hm_fields(html: str, listing_url: str, next_data: dict[str, Any] | 
     if body_condition is None:
         body_match = re.search(r"وضعیت بدنه\s*[:：]?\s*([^\n\r|]+)", text)
         if body_match:
-            body_condition = body_match.group(1).strip()
+            body_condition = normalize_body_condition_raw(body_match.group(1))
+            if body_condition:
+                body_condition_source_path = "html:text:وضعیت بدنه"
 
     if year is None:
         year_match = re.search(r"(13\d{2}|14\d{2})", text)
@@ -560,6 +569,7 @@ def _extract_hm_fields(html: str, listing_url: str, next_data: dict[str, Any] | 
         listing_url=listing_url,
         created_at_source=created_at_source,
         price_debug_note=price_note,
+        body_condition_source_path=body_condition_source_path,
     )
 
 
@@ -686,16 +696,24 @@ def parse_hm_listing_from_html(html: str, listing_url: str) -> HMDetailExtract:
     extract = _extract_hm_fields(html, listing_url, next_data)
 
     if not extract.brand or not extract.model:
-        raise HMParseIntegrityError(
-            f"HM parse integrity failed (missing brandName/modelName) external_id={extract.external_id!r} url={listing_url}"
+        LOGGER.warning(
+            "hm_scraper incomplete brand/model external_id=%r url=%s",
+            extract.external_id,
+            listing_url,
         )
     if extract.price is None:
-        raise HMParseIntegrityError(
-            f"HM parse integrity failed (missing numeric price) external_id={extract.external_id!r} url={listing_url}"
+        LOGGER.warning(
+            "hm_scraper missing numeric price external_id=%r url=%s note=%r",
+            extract.external_id,
+            listing_url,
+            extract.price_debug_note,
         )
     if extract.mileage is None or extract.mileage < 0:
-        raise HMParseIntegrityError(
-            f"HM parse integrity failed (missing/invalid mileage) external_id={extract.external_id!r} url={listing_url}"
+        LOGGER.warning(
+            "hm_scraper missing/invalid mileage external_id=%r url=%s mileage=%s",
+            extract.external_id,
+            listing_url,
+            extract.mileage,
         )
 
     return extract

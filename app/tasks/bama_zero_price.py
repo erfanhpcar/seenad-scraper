@@ -14,7 +14,7 @@ LOGGER = logging.getLogger(__name__)
 @celery_app.task(name="tasks.bama_zero_price_scrape")
 def bama_zero_price_scrape() -> dict[str, Any]:
     """
-    Full hierarchy fetch, snapshot raw rows, fuzzy match to ``car_entities``, upsert ``car_zero_price``.
+    Full hierarchy fetch; persist raw rows to ``car_zero_price_scrape_snapshot`` only.
 
     Bounded by SoftTimeLimit / TimeLimit on the worker.
     """
@@ -32,11 +32,10 @@ def bama_zero_price_scrape() -> dict[str, Any]:
         page_size = max(10, min(int(raw), DEFAULT_PAGE_SIZE_MAX))
 
     dry_run = os.getenv("BAMA_ZERO_PRICE_DRY_RUN", "").strip().lower() in {"1", "true", "yes"}
-    capture_raw = os.getenv("BAMA_ZERO_PRICE_CAPTURE_RAW", "1").strip().lower() not in {"0", "false", "no"}
+    capture_raw = True
     full_crawl = os.getenv("BAMA_ZERO_PRICE_FULL_CRAWL", "").strip().lower() in {"1", "true", "yes"}
     if full_crawl:
         page_size = DEFAULT_PAGE_SIZE_MAX
-        capture_raw = True
     max_pages_env = os.getenv("BAMA_ZERO_PRICE_MAX_PAGES", "").strip()
     max_hierarchy_pages: int | None = None
     if max_pages_env.isdigit():

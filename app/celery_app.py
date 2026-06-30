@@ -112,7 +112,7 @@ if _hm_beat_enabled:
         "schedule": timedelta(seconds=_hm_interval_s),
     }
 
-_mapping_pipeline_beat_enabled = os.getenv("MAPPING_PIPELINE_BEAT_ENABLED", "1").strip().lower() not in {
+_mapping_pipeline_beat_enabled = os.getenv("MAPPING_PIPELINE_BEAT_ENABLED", "0").strip().lower() not in {
     "0",
     "false",
     "no",
