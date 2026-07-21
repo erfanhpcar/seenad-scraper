@@ -9,8 +9,6 @@ from typing import Literal
 
 BodyConditionSummary = Literal["healthy", "non_healthy", "unknown"]
 
-HEALTHY_BODY_STATUS_FA = "سالم و بی‌خط و خش"
-
 # Exact healthy labels per source (after whitespace trim; ZWNJ-insensitive match also applied).
 _HEALTHY_EXACT_BY_SOURCE: dict[str, frozenset[str]] = {
     "bama": frozenset(
@@ -26,7 +24,7 @@ _HEALTHY_EXACT_BY_SOURCE: dict[str, frozenset[str]] = {
     ),
     "hm": frozenset({"سالم"}),
     "hamrah-mechanic": frozenset({"سالم"}),
-    "karnameh": frozenset({"intact"}),
+    "karnameh": frozenset({"intact", "سالم"}),
 }
 
 _NON_HEALTHY_KEYWORDS: tuple[str, ...] = (
@@ -51,6 +49,27 @@ _NON_HEALTHY_KEYWORDS: tuple[str, ...] = (
     "دور رنگ",
     "رنگ کامل",
 )
+
+_KARNAMEH_NON_HEALTHY_EN: dict[str, str] = {
+    "painted": "partially_repainted",
+    "scratched": "minor_scratches",
+    "damaged": "minor_scratches",
+}
+
+_PERSIAN_DIGIT_MAP = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+
+_PERSIAN_WORD_NUMBERS: dict[str, int] = {
+    "یک": 1,
+    "دو": 2,
+    "سه": 3,
+    "چهار": 4,
+    "پنج": 5,
+    "شش": 6,
+    "هفت": 7,
+    "هشت": 8,
+    "نه": 9,
+    "ده": 10,
+}
 
 _ZWNJ = "\u200c"
 
@@ -118,6 +137,13 @@ def classify_body_condition(raw: str | None, source: str) -> BodyConditionSummar
         return "non_healthy"
 
     source_key = _canonical_source(source)
+    compact = _compact_for_match(normalized)
+
+    if source_key == "karnameh":
+        for en_key in _KARNAMEH_NON_HEALTHY_EN:
+            if en_key in compact:
+                return "non_healthy"
+
     if source_key == "bama":
         if "رنگ" in normalized and "بدون رنگ" not in normalized:
             return "non_healthy"
@@ -129,11 +155,74 @@ def classify_body_condition(raw: str | None, source: str) -> BodyConditionSummar
     return "unknown"
 
 
+def _extract_painted_area_count(normalized: str) -> int | None:
+    ascii_text = normalized.translate(_PERSIAN_DIGIT_MAP).lower()
+
+    digit_match = re.search(r"(\d+)\s*(?:قطعه|لکه)\s*رنگ", ascii_text)
+    if digit_match:
+        return int(digit_match.group(1))
+
+    digit_match = re.search(r"(\d+)\s*لکه", ascii_text)
+    if digit_match:
+        return int(digit_match.group(1))
+
+    for word, number in _PERSIAN_WORD_NUMBERS.items():
+        if re.search(rf"{word}\s*(?:قطعه|لکه)\s*رنگ", normalized):
+            return number
+        if re.search(rf"{word}\s*لکه", normalized):
+            return number
+
+    return None
+
+
+def infer_body_condition_key_en(normalized: str | None, summary: BodyConditionSummary) -> str | None:
+    """Map raw Persian/English body text to Seenad body_condition_key_en."""
+    if summary == "healthy":
+        return "perfect_condition"
+    if summary != "non_healthy" or not normalized:
+        return None
+
+    compact = _compact_for_match(normalized)
+    ascii_text = normalized.translate(_PERSIAN_DIGIT_MAP).lower()
+
+    for en_key, mapped in _KARNAMEH_NON_HEALTHY_EN.items():
+        if en_key in compact:
+            return mapped
+
+    if any(token in normalized for token in ("فول رنگ", "تمام رنگ", "تمام‌رنگ", "کامل رنگ", "fully repainted")):
+        return "fully_repainted"
+
+    if any(token in normalized for token in ("نیمه", "دور رنگ", "دوررنگ", "partially repainted", "partial")):
+        return "partially_repainted"
+
+    if "صافکاری" in normalized and "رنگ" not in normalized:
+        return "paintless_dent_repair"
+
+    painted_count = _extract_painted_area_count(normalized)
+    if painted_count is not None:
+        if painted_count <= 0:
+            return "minor_scratches"
+        if painted_count == 1:
+            return "painted_1_area"
+        if painted_count <= 10:
+            return f"painted_{painted_count}_areas"
+        return "painted_10_areas"
+
+    if any(token in normalized for token in ("خط و خش", "خش")) or "scratch" in ascii_text:
+        return "minor_scratches"
+
+    if "رنگ" in normalized:
+        return "minor_scratches"
+
+    return "minor_scratches"
+
+
 @dataclass(frozen=True)
 class BodyConditionFields:
     body_condition_raw: str | None
     body_status: str | None
     body_condition: str | None
+    body_condition_text: str | None
     body_condition_summary: BodyConditionSummary
     body_condition_key_en: str | None
     body_condition_is_healthy: bool | None
@@ -153,24 +242,24 @@ def build_body_condition_fields(
     summary = classify_body_condition(normalized, source)
     timestamp = (extracted_at or datetime.now(timezone.utc)).replace(microsecond=0)
     extracted_at_iso = timestamp.isoformat().replace("+00:00", "Z")
+    key_en = infer_body_condition_key_en(normalized, summary)
 
     if summary == "healthy":
-        body_status = HEALTHY_BODY_STATUS_FA
-        key_en: str | None = "perfect_condition"
+        display_text = normalized
         is_healthy: bool | None = True
     elif summary == "non_healthy":
-        body_status = normalized
-        key_en = None
+        display_text = normalized
         is_healthy = False
     else:
-        body_status = None
+        display_text = None
         key_en = None
         is_healthy = None
 
     return BodyConditionFields(
         body_condition_raw=normalized,
-        body_status=body_status,
-        body_condition=normalized,
+        body_status=display_text,
+        body_condition=display_text,
+        body_condition_text=display_text,
         body_condition_summary=summary,
         body_condition_key_en=key_en,
         body_condition_is_healthy=is_healthy,
@@ -180,10 +269,14 @@ def build_body_condition_fields(
 
 
 def body_condition_fields_to_raw_data(fields: BodyConditionFields) -> dict[str, object]:
+    """Serialize contract fields; omit unknown/unextracted summaries from payload."""
+    if fields.body_condition_summary == "unknown":
+        return {}
     return {
         "body_condition_raw": fields.body_condition_raw,
         "body_status": fields.body_status,
         "body_condition": fields.body_condition,
+        "body_condition_text": fields.body_condition_text,
         "body_condition_summary": fields.body_condition_summary,
         "body_condition_key_en": fields.body_condition_key_en,
         "body_condition_is_healthy": fields.body_condition_is_healthy,

@@ -1,10 +1,6 @@
-x-runflare-hosts: &runflare_hosts
-  - "mirror-linux.runflare.com:185.126.10.222"
-  - "mirror-pypi.runflare.com:185.126.10.222"
-
 services:
   redis:
-    image: docker.arvancloud.ir/redis:7-alpine
+    image: redis:7-alpine
     container_name: seenad_redis
     restart: unless-stopped
     ports:
@@ -17,7 +13,7 @@ services:
       retries: 5
 
   db:
-    image: docker.arvancloud.ir/postgres:16
+    image: postgres:16
     container_name: seenad_db
     restart: unless-stopped
     command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
@@ -42,13 +38,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      extra_hosts: *runflare_hosts
     container_name: seenad_backend
     restart: unless-stopped
     working_dir: /app
     extra_hosts:
-      - "mirror-linux.runflare.com:185.126.10.222"
-      - "mirror-pypi.runflare.com:185.126.10.222"
       - "bama.ir:185.166.104.4"
       - "www.bama.ir:185.166.104.4"
       - "karnameh.com:185.166.104.4"
@@ -69,7 +62,6 @@ services:
       POSTGRES_PORT: 5432
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
-      PIP_INDEX_URL: https://mirror-pypi.runflare.com/simple
     ports:
       - "8000:8000"
     depends_on:
@@ -82,13 +74,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      extra_hosts: *runflare_hosts
     container_name: seenad_worker
     restart: unless-stopped
     working_dir: /app
     extra_hosts:
-      - "mirror-linux.runflare.com:185.126.10.222"
-      - "mirror-pypi.runflare.com:185.126.10.222"
       - "bama.ir:185.166.104.4"
       - "www.bama.ir:185.166.104.4"
       - "karnameh.com:185.166.104.4"
@@ -110,7 +99,6 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       PYTHONPATH: /app
-      PIP_INDEX_URL: https://mirror-pypi.runflare.com/simple
     depends_on:
       db:
         condition: service_healthy
@@ -121,13 +109,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      extra_hosts: *runflare_hosts
     container_name: seenad_beat
     restart: unless-stopped
     working_dir: /app
     extra_hosts:
-      - "mirror-linux.runflare.com:185.126.10.222"
-      - "mirror-pypi.runflare.com:185.126.10.222"
       - "bama.ir:185.166.104.4"
       - "www.bama.ir:185.166.104.4"
       - "hamrah-mechanic.com:185.143.232.253"
@@ -160,8 +145,13 @@ services:
       BAMA_INGESTION_BEAT_ENABLED: "1"
       BAMA_DISCOVERY_INTERVAL_SECONDS: "300"
       BAMA_DISCOVERY_BEAT_ENABLED: "1"
+      HM_INGESTION_BEAT_ENABLED: "1"
+      HM_INGESTION_INTERVAL_SECONDS: "30"
+      KN_INGESTION_BEAT_ENABLED: "1"
+      KN_INGESTION_INTERVAL_SECONDS: "30"
+      LISTING_FEEDER_BEAT_ENABLED: "1"
+      LISTING_FEEDER_INTERVAL_SECONDS: "300"
       MAPPING_PIPELINE_BEAT_ENABLED: "0"
-      PIP_INDEX_URL: https://mirror-pypi.runflare.com/simple
     depends_on:
       db:
         condition: service_healthy

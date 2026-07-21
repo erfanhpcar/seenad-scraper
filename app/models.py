@@ -52,4 +52,9 @@ class ScrapedListing(Base):
     trim_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     raw_data: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     created_at_source: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    scraped_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    scraped_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        index=True,
+    )

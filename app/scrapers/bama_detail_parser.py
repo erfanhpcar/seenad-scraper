@@ -606,15 +606,54 @@ def _trim_text_implies_gearbox(tx: str) -> bool:
     return any(h in tx or h in lowered for h in gearbox_hints)
 
 
-def _body_status_from_nuxt_vehicle(vehicle: dict[str, Any]) -> tuple[str | None, str | None]:
-    body_status = vehicle.get("bodyStatus")
-    if isinstance(body_status, dict):
-        for key in ("value", "text"):
-            raw = body_status.get(key)
+def _iter_nuxt_dict_nodes(node: Any):
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from _iter_nuxt_dict_nodes(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _iter_nuxt_dict_nodes(item)
+
+
+def _body_value_from_blob(blob: Any) -> str | None:
+    if isinstance(blob, str) and blob.strip():
+        return normalize_body_condition_raw(blob)
+    if isinstance(blob, dict):
+        for key in ("value", "text", "label", "name"):
+            raw = blob.get(key)
             if isinstance(raw, str) and raw.strip():
                 normalized = normalize_body_condition_raw(raw)
                 if normalized:
+                    return normalized
+    return None
+
+
+def _body_status_from_nuxt_vehicle(vehicle: dict[str, Any]) -> tuple[str | None, str | None]:
+    body_status = vehicle.get("bodyStatus")
+    normalized = _body_value_from_blob(body_status)
+    if normalized:
+        if isinstance(body_status, dict):
+            for key in ("value", "text"):
+                raw = body_status.get(key)
+                if isinstance(raw, str) and raw.strip():
                     return normalized, f"vehicle.bodyStatus.{key}"
+        return normalized, "vehicle.bodyStatus"
+    return None, None
+
+
+def _body_status_from_nuxt_labeled_specs(inner: dict[str, Any]) -> tuple[str | None, str | None]:
+    labels = ("وضعیت بدنه", "وضعیت رنگ", "رنگ شدگی", "خط و خش")
+    for node in _iter_nuxt_dict_nodes(inner):
+        label_key = node.get("key") or node.get("title") or node.get("label") or node.get("name")
+        if not isinstance(label_key, str):
+            continue
+        if not any(lbl in label_key for lbl in labels):
+            continue
+        for value_key in ("value", "text", "content"):
+            normalized = _body_value_from_blob(node.get(value_key))
+            if normalized:
+                return normalized, f"nuxt:label:{label_key.strip()}"
     return None, None
 
 
@@ -628,17 +667,35 @@ def _body_status_from_nuxt_inner(inner: dict[str, Any]) -> tuple[str | None, str
     details = specs.get("details") if isinstance(specs.get("details"), dict) else {}
     for key in ("bodyStatus", "body_status", "bodyCondition", "body_condition"):
         blob = details.get(key)
-        if isinstance(blob, dict):
-            for sub_key in ("value", "text"):
-                raw = blob.get(sub_key)
-                if isinstance(raw, str) and raw.strip():
-                    normalized = normalize_body_condition_raw(raw)
-                    if normalized:
+        normalized = _body_value_from_blob(blob)
+        if normalized:
+            if isinstance(blob, dict):
+                for sub_key in ("value", "text"):
+                    raw = blob.get(sub_key)
+                    if isinstance(raw, str) and raw.strip():
                         return normalized, f"vehicle.specs.details.{key}.{sub_key}"
-        elif isinstance(blob, str) and blob.strip():
-            normalized = normalize_body_condition_raw(blob)
+            return normalized, f"vehicle.specs.details.{key}"
+
+    value, path = _body_status_from_nuxt_labeled_specs(inner)
+    if value:
+        return value, path
+
+    priority_keys = (
+        "bodyStatus",
+        "body_status",
+        "bodyCondition",
+        "body_condition",
+        "colorStatus",
+        "paintStatus",
+        "scratchStatus",
+        "damageStatus",
+    )
+    for node in _iter_nuxt_dict_nodes(inner):
+        for key in priority_keys:
+            normalized = _body_value_from_blob(node.get(key))
             if normalized:
-                return normalized, f"vehicle.specs.details.{key}"
+                return normalized, f"nuxt.{key}"
+
     return None, None
 
 

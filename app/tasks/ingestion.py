@@ -209,7 +209,7 @@ def _validate_hm_extract_for_persist(extract: HMDetailExtract) -> None:
 
 def _build_hm_raw_payload(extract: HMDetailExtract) -> dict[str, object]:
     payload: dict[str, object] = {
-        "source": "hm",
+        "source": "hamrah-mechanic",
         "url": extract.listing_url,
         "brand": extract.brand,
         "model": extract.model,
