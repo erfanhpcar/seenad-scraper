@@ -3,11 +3,27 @@ services:
     image: redis:7-alpine
     container_name: seenad_redis
     restart: unless-stopped
-    ports:
-      - "6379:6379"
-    command: ["redis-server", "--appendonly", "yes"]
+    # Not published to host — internal Docker network only
+    command:
+      [
+        "redis-server",
+        "--appendonly",
+        "yes",
+        "--requirepass",
+        "${REDIS_PASSWORD}",
+        "--maxmemory",
+        "256mb",
+        "--maxmemory-policy",
+        "allkeys-lru",
+        "--protected-mode",
+        "yes",
+      ]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep PONG"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -22,6 +38,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
+      # Kept public for remote project access (credentials unchanged)
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -60,8 +77,9 @@ services:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
     ports:
       - "8000:8000"
     depends_on:
@@ -96,8 +114,9 @@ services:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       PYTHONPATH: /app
     depends_on:
       db:
@@ -138,8 +157,9 @@ services:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       PYTHONPATH: /app
       BAMA_INGESTION_INTERVAL_SECONDS: "30"
       BAMA_INGESTION_BEAT_ENABLED: "1"
@@ -159,5 +179,13 @@ services:
         condition: service_healthy
 
 volumes:
+  # Keep existing production volumes (do not recreate empty ones)
   postgres_data:
+    external: true
+    name: project_postgres_data
   celerybeat_schedule:
+    external: true
+    name: project_celerybeat_schedule
+  redis_data:
+    external: true
+    name: cc382202853ddc03aaa07ce8cf2277f80a90ba125a7e3c79a0ec23660bbf64c9
