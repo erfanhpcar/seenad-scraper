@@ -69,7 +69,35 @@ Then load snapshot rows for that `batch_id` from the matching snapshot table. Do
 4. Optional backfill: historical batches without registry rows remain invisible to main until
    a new `completed` crawl exists (no automatic backfill).
 
-Integration tests: `tests/test_zero_price_batch_registry_postgres.py` (requires PostgreSQL).
+### PostgreSQL integration tests (opt-in, isolated database)
+
+File: `tests/test_zero_price_batch_registry_postgres.py`
+
+**Default:** skipped (no PostgreSQL required for normal `unittest` runs).
+
+**Never** point these tests at the operational scraper database (`seenad_db`). A prior run
+inside `seenad_backend` used `app.database` → `DATABASE_URL=...@db:5432/seenad_db` when
+`ZERO_PRICE_BATCH_PG_TESTS` defaulted to enabled; that path is removed.
+
+Opt-in steps:
+
+1. Create an empty database whose name ends with `_test`, e.g. `seenad_zero_price_batch_test`.
+2. Export:
+   - `ZERO_PRICE_BATCH_PG_TESTS=1`
+   - `ZERO_PRICE_BATCH_TEST_DATABASE_URL=postgresql+psycopg2://USER:PASS@HOST:5432/seenad_zero_price_batch_test`
+3. Run only the integration module:
+   `python -m unittest tests.test_zero_price_batch_registry_postgres -v`
+
+Guards (fail-closed):
+
+- Refuses `seenad_db` and `postgres` database names.
+- Refuses any database name that does not end with `_test` unless listed in
+  `ZERO_PRICE_BATCH_TEST_ALLOWED_DB_NAMES`.
+- DDL from `tests/sql/zero_price_batch_integration_schema.sql` (test-only minimal tables,
+  aligned with production `022` registry contract) runs **only** on the URL above — not
+  production migration files that touch `car_zero_price`.
+
+Unit tests in `tests/test_zero_price_batch_registry.py` remain mock-based and need no database.
 
 ## SB-01 benchmark beat
 

@@ -5,6 +5,10 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
+from tests.zero_price_batch_test_db import (
+    ZeroPriceBatchTestDatabaseRejected,
+    assert_isolated_test_database_url,
+)
 from src.scraper.zero_price_batch_registry import (
     STATUS_COMPLETED,
     STATUS_FAILED,
@@ -15,6 +19,20 @@ from src.scraper.zero_price_batch_registry import (
     begin_zero_price_batch,
     complete_zero_price_batch,
 )
+
+
+class ZeroPriceBatchTestDatabaseGuardTests(unittest.TestCase):
+    def test_rejects_operational_seenad_db_url(self) -> None:
+        with self.assertRaises(ZeroPriceBatchTestDatabaseRejected):
+            assert_isolated_test_database_url("postgresql+psycopg2://u:p@db:5432/seenad_db")
+
+    def test_accepts_name_ending_with_test(self) -> None:
+        self.assertEqual(
+            assert_isolated_test_database_url(
+                "postgresql+psycopg2://u:p@localhost:5432/seenad_zero_price_batch_test"
+            ),
+            "seenad_zero_price_batch_test",
+        )
 
 
 class ZeroPriceBatchRegistryTests(unittest.TestCase):
