@@ -124,6 +124,50 @@ services:
       redis:
         condition: service_healthy
 
+  benchmark_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: seenad_benchmark_worker
+    restart: unless-stopped
+    working_dir: /app
+    profiles:
+      - benchmark
+    # Requires BENCHMARK_DATABASE_URL (export or secrets/benchmark_database_url before compose up)
+    extra_hosts:
+      - "bama.ir:185.166.104.4"
+      - "www.bama.ir:185.166.104.4"
+      - "hamrah-mechanic.com:185.143.232.253"
+      - "www.hamrah-mechanic.com:185.143.232.253"
+    dns:
+      - 8.8.8.8
+      - 4.2.2.4
+    volumes:
+      - ./:/app
+    env_file:
+      - .env
+    command:
+      [
+        "celery",
+        "-A",
+        "app.celery_app:celery_app",
+        "worker",
+        "--concurrency=1",
+        "--loglevel=info",
+        "-Q",
+        "scheduled_tasks",
+      ]
+    environment:
+      DATABASE_URL: ${BENCHMARK_DATABASE_URL}
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      PYTHONPATH: /app
+      BENCHMARK_ENABLED: "1"
+    depends_on:
+      redis:
+        condition: service_healthy
+
   beat:
     build:
       context: .
@@ -172,6 +216,18 @@ services:
       LISTING_FEEDER_BEAT_ENABLED: "1"
       LISTING_FEEDER_INTERVAL_SECONDS: "300"
       MAPPING_PIPELINE_BEAT_ENABLED: "0"
+      USD_IRR_RATE_BEAT_ENABLED: "1"
+      USD_IRR_RATE_BEAT_HOURS_UTC: "7,14"
+      USD_IRR_RATE_BEAT_MINUTE_UTC: "30"
+      SELL_NEWS_BEAT_ENABLED: "1"
+      SELL_NEWS_BEAT_HOURS_UTC: "7,12"
+      SELL_NEWS_BEAT_MINUTE_UTC: "30"
+      IRANJIB_ZERO_PRICE_BEAT_ENABLED: "1"
+      IRANJIB_ZERO_PRICE_BEAT_HOURS_UTC: "6,12"
+      IRANJIB_ZERO_PRICE_BEAT_MINUTE_UTC: "35"
+      ZERO_PRICE_BENCHMARK_BEAT_ENABLED: "1"
+      ZERO_PRICE_BENCHMARK_BEAT_HOURS_UTC: "6,12"
+      ZERO_PRICE_BENCHMARK_BEAT_MINUTE_UTC: "15"
     depends_on:
       db:
         condition: service_healthy

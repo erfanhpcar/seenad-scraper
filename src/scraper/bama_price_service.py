@@ -15,6 +15,7 @@ under a fresh ``batch_id``. Entity matching and ``car_zero_price`` upserts belon
 from __future__ import annotations
 
 import logging
+import os
 import random
 import time
 import uuid
@@ -37,11 +38,20 @@ HIERARCHY_PATH: Final[str] = "/cad/api/price/hierarchy"
 DEFAULT_PAGE_SIZE: Final[int] = 75
 DEFAULT_PAGE_SIZE_MAX: Final[int] = 500
 DEFAULT_REQUEST_TIMEOUT_S: Final[float] = 45.0
+DEFAULT_HTTP_MAX_ATTEMPTS: Final[int] = 5
+DEFAULT_HTTP_BACKOFF_BASE_S: Final[float] = 2.0
+DEFAULT_HTTP_BACKOFF_CAP_S: Final[float] = 30.0
 RAW_SNAPSHOT_DB_FLUSH_INTERVAL: Final[int] = 400
+RETRYABLE_HTTP_STATUS: Final[frozenset[int]] = frozenset({408, 425, 429, 500, 502, 503, 504})
 USER_AGENT: Final[str] = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
+
+
+class BamaHierarchyTransientError(Exception):
+    """Timeouts, gateway flaps, or empty catalogue worth retrying at Celery level."""
+
 
 def generate_scrape_batch_id() -> str:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -103,6 +113,26 @@ class BamaZeroPriceRunSummary:
         }
 
 
+def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(minimum, int(raw))
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(minimum, float(raw))
+    except ValueError:
+        return default
+
+
 def _http_session() -> requests.Session:
     session = requests.Session()
     session.headers.update(
@@ -113,6 +143,114 @@ def _http_session() -> requests.Session:
         }
     )
     return session
+
+
+def _backoff_seconds(attempt: int, *, base: float, cap: float) -> float:
+    wait = min(cap, base * (2 ** (attempt - 1)))
+    return wait + random.uniform(0.0, wait * 0.25)
+
+
+def _retry_after_seconds(response: requests.Response, fallback: float) -> float:
+    raw = response.headers.get("Retry-After")
+    if not raw:
+        return fallback
+    try:
+        return max(fallback, float(raw))
+    except ValueError:
+        return fallback
+
+
+def fetch_hierarchy_page(
+    session: requests.Session,
+    *,
+    url: str,
+    page_index: int,
+    page_size: int,
+    timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_S,
+    max_attempts: int | None = None,
+    backoff_base: float | None = None,
+    backoff_cap: float | None = None,
+) -> list[Any]:
+    """GET one hierarchy page. Retry timeouts and gateway/CDN errors; fail fast on 4xx like 403."""
+
+    attempts = max_attempts if max_attempts is not None else _env_int(
+        "BAMA_ZERO_PRICE_HTTP_MAX_ATTEMPTS", DEFAULT_HTTP_MAX_ATTEMPTS, minimum=1
+    )
+    base = backoff_base if backoff_base is not None else _env_float(
+        "BAMA_ZERO_PRICE_HTTP_BACKOFF_BASE_S", DEFAULT_HTTP_BACKOFF_BASE_S, minimum=0.1
+    )
+    cap = backoff_cap if backoff_cap is not None else _env_float(
+        "BAMA_ZERO_PRICE_HTTP_BACKOFF_CAP_S", DEFAULT_HTTP_BACKOFF_CAP_S, minimum=1.0
+    )
+    last_exc: BaseException | None = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            response = session.get(
+                url,
+                params={"pageIndex": page_index, "pageSize": page_size},
+                timeout=timeout_seconds,
+            )
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            last_exc = exc
+            if attempt >= attempts:
+                break
+            wait = _backoff_seconds(attempt, base=base, cap=cap)
+            LOGGER.warning(
+                "bama_price hierarchy page=%s network error attempt=%s/%s kind=%s detail=%s — sleep %.1fs",
+                page_index,
+                attempt,
+                attempts,
+                type(exc).__name__,
+                exc,
+                wait,
+            )
+            time.sleep(wait)
+            continue
+
+        if response.status_code in RETRYABLE_HTTP_STATUS:
+            last_exc = requests.HTTPError(
+                f"{response.status_code} Server Error: {response.reason} for url: {response.url}",
+                response=response,
+            )
+            if attempt >= attempts:
+                break
+            wait = _retry_after_seconds(
+                response, _backoff_seconds(attempt, base=base, cap=cap)
+            )
+            LOGGER.warning(
+                "bama_price hierarchy page=%s HTTP %s attempt=%s/%s — sleep %.1fs",
+                page_index,
+                response.status_code,
+                attempt,
+                attempts,
+                wait,
+            )
+            time.sleep(wait)
+            continue
+
+        response.raise_for_status()
+        payload: Mapping[str, Any] = response.json()
+        blocks = payload.get("data") or []
+        if not isinstance(blocks, list):
+            blocks = []
+        if attempt > 1:
+            LOGGER.info(
+                "bama_price hierarchy page=%s recovered after attempt=%s/%s",
+                page_index,
+                attempt,
+                attempts,
+            )
+        return blocks
+
+    assert last_exc is not None
+    LOGGER.error(
+        "bama_price hierarchy page=%s exhausted attempts=%s last_error=%s",
+        page_index,
+        attempts,
+        last_exc,
+    )
+    raise last_exc
 
 
 def _optional_int(value: Any) -> int | None:
@@ -220,14 +358,13 @@ def iterate_hierarchy_items(
             return
 
         time.sleep(random.uniform(*inter_page_delay_seconds))
-        response = session.get(
-            url,
-            params={"pageIndex": page_index, "pageSize": page_size},
-            timeout=timeout_seconds,
+        blocks = fetch_hierarchy_page(
+            session,
+            url=url,
+            page_index=page_index,
+            page_size=page_size,
+            timeout_seconds=timeout_seconds,
         )
-        response.raise_for_status()
-        payload: Mapping[str, Any] = response.json()
-        blocks = payload.get("data") or []
         item_count = 0
         for group in blocks:
             if not isinstance(group, Mapping):
@@ -357,11 +494,16 @@ def run_bama_zero_price_pipeline(
                             )
             if persist_batch:
                 db.commit()
-        except requests.RequestException as exc:
+        except (requests.RequestException, BamaHierarchyTransientError) as exc:
             errors_http += 1
             LOGGER.exception("bama_price HTTP failure: %s", exc)
             db.rollback()
             raise
+
+    if persist_batch and raw_rows_persisted <= 0:
+        raise BamaHierarchyTransientError(
+            f"bama_price empty snapshot batch_id={logical_batch} pages={len(page_indexes)}"
+        )
 
     summary = BamaZeroPriceRunSummary(
         pages_fetched=len(page_indexes),

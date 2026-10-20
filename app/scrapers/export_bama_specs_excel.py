@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-Export ``bama_scraped_specs.jsonl`` to a product-manager-friendly Excel workbook.
+Export Bama car specs (nested JSON or JSONL) to a product-manager Excel workbook.
 
 Sheets:
-  - خلاصه خودروها: one row per scraped car (metadata + counts)
-  - مشخصات تفصیلی: long format (car × section × feature × value)
+  - خلاصه تریم‌ها: one row per trim (identity + scores + key specs)
+  - مشخصات تفصیلی: long format (trim × section × feature × value)
+  - امتیاز و نظرات: scores, strengths, weaknesses
   - خطاهای استخراج: failed URLs from scraper progress (if present)
 
 Usage::
 
     python app/scrapers/export_bama_specs_excel.py
-    python app/scrapers/export_bama_specs_excel.py --input bama_scraped_specs.jsonl
+    python app/scrapers/export_bama_specs_excel.py --input data/raw_bama_car_specs.json
+    docker exec -i seenad_backend python3 app/scrapers/export_bama_specs_excel.py
 """
 
 from __future__ import annotations
@@ -19,21 +21,35 @@ import argparse
 import json
 import logging
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import pandas as pd
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
 
 LOGGER = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_JSONL = PROJECT_ROOT / "bama_scraped_specs.jsonl"
-DEFAULT_PROGRESS = Path(__file__).resolve().parent / "scraper_progress.json"
-DEFAULT_OUTPUT = PROJECT_ROOT / "bama_scraped_specs.xlsx"
-MAX_COLUMN_WIDTH = 72
+DEFAULT_JSON = PROJECT_ROOT / "data" / "raw_bama_car_specs.json"
+DEFAULT_PROGRESS = PROJECT_ROOT / "data" / "bama_specs_progress.json"
+DEFAULT_OUTPUT = PROJECT_ROOT / "data" / "raw_bama_car_specs.xlsx"
+MAX_COLUMN_WIDTH = 56
+
+KEY_SPEC_COLUMNS: list[tuple[str, str, str]] = [
+    ("وضعیت در بازار ایران", "سال های موجود", "سال‌های موجود"),
+    ("مشخصات فنی", "محور محرک", "محور محرک"),
+    ("مشخصات فنی", "گیربکس", "گیربکس"),
+    ("مشخصات فنی", "پیشرانه", "پیشرانه"),
+    ("مشخصات فنی", "حجم موتور", "حجم موتور"),
+    ("عملکرد فنی", "قدرت", "قدرت"),
+    ("عملکرد فنی", "گشتاور", "گشتاور"),
+    ("عملکرد فنی", "شتاب", "شتاب"),
+    ("عملکرد فنی", "سرعت", "سرعت"),
+    ("عملکرد فنی", "مصرف ترکیبی", "مصرف ترکیبی"),
+    ("ابعاد و اندازه ها", "نوع بدنه", "نوع بدنه"),
+]
 
 
 def _format_value(value: Any) -> str:
@@ -43,7 +59,18 @@ def _format_value(value: Any) -> str:
         return "خیر"
     if value is None:
         return ""
+    if isinstance(value, list):
+        return " | ".join(_format_value(item) for item in value if _format_value(item))
     return str(value)
+
+
+def _spec_value(specs: Any, section: str, key: str) -> str:
+    if not isinstance(specs, dict):
+        return ""
+    items = specs.get(section)
+    if not isinstance(items, dict):
+        return ""
+    return _format_value(items.get(key))
 
 
 def _parse_car_identity(url: str) -> tuple[str, str, str]:
@@ -55,71 +82,117 @@ def _parse_car_identity(url: str) -> tuple[str, str, str]:
     return brand, model_slug, display
 
 
-def load_jsonl_records(jsonl_path: Path) -> list[dict[str, Any]]:
-    if not jsonl_path.is_file():
-        raise FileNotFoundError(f"JSONL file not found: {jsonl_path}")
+def load_nested_models(path: Path) -> tuple[list[dict[str, Any]], str]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+        raise ValueError(f"Expected nested specs JSON with models[]: {path}")
+    return payload["models"], str(payload.get("crawled_at") or "")
 
-    records: list[dict[str, Any]] = []
-    with jsonl_path.open(encoding="utf-8") as handle:
-        for line_no, line in enumerate(handle, start=1):
-            text = line.strip()
-            if not text:
+
+def flatten_trims(models: list[dict[str, Any]], crawled_at: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for model in models:
+        trims = model.get("trims")
+        if not isinstance(trims, list):
+            continue
+        for trim in trims:
+            if not isinstance(trim, dict):
                 continue
-            try:
-                payload = json.loads(text)
-            except json.JSONDecodeError as exc:
-                LOGGER.warning("Skipping invalid JSONL line %d: %s", line_no, exc)
-                continue
-            if isinstance(payload, dict):
-                records.append(payload)
-    return records
-
-
-def build_summary_rows(records: list[dict[str, Any]]) -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
-    for record in records:
-        url = str(record.get("url", ""))
-        brand, model_slug, model_display = _parse_car_identity(url)
-        rows.append(
-            {
-                "لینک صفحه": url,
-                "برند": brand,
-                "مدل (اسلاگ)": model_slug,
-                "مدل (خوانا)": model_display,
-                "تاریخ استخراج": str(record.get("scraped_at", "")),
-                "تعداد بخش‌ها": str(record.get("section_count", "")),
-                "تعداد ویژگی‌ها": str(record.get("item_count", "")),
-            }
-        )
+            rows.append(
+                {
+                    "brand_slug": str(model.get("brand_slug") or ""),
+                    "model_slug": str(model.get("model_slug") or ""),
+                    "model_id": str(model.get("model_id") or ""),
+                    "title": str(model.get("title") or ""),
+                    "trim_slug": str(trim.get("trim_slug") or ""),
+                    "trim_name": str(trim.get("trim_name") or ""),
+                    "url": str(trim.get("url") or ""),
+                    "year_label": str(trim.get("year_label") or ""),
+                    "review": trim.get("review") if isinstance(trim.get("review"), dict) else {},
+                    "section_count": trim.get("section_count", ""),
+                    "item_count": trim.get("item_count", ""),
+                    "specs": trim.get("specs") if isinstance(trim.get("specs"), dict) else {},
+                    "scraped_at": str(trim.get("scraped_at") or crawled_at),
+                    "model_trim_count": model.get("trim_count", len(trims)),
+                }
+            )
     return rows
 
 
-def build_detail_rows(records: list[dict[str, Any]]) -> list[dict[str, str]]:
+def build_summary_rows(trims: list[dict[str, Any]]) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
-    for record in records:
-        url = str(record.get("url", ""))
-        brand, model_slug, model_display = _parse_car_identity(url)
-        scraped_at = str(record.get("scraped_at", ""))
-        specs = record.get("specs")
-        if not isinstance(specs, dict):
-            continue
+    for trim in trims:
+        review = trim["review"]
+        scores = review.get("scores") if isinstance(review.get("scores"), dict) else {}
+        row: dict[str, str] = {
+            "برند": trim["brand_slug"],
+            "مدل": trim["title"] or trim["model_slug"],
+            "شناسه مدل": trim["model_id"],
+            "تریم": trim["trim_name"] or trim["trim_slug"] or "(بدون تریم)",
+            "اسلاگ تریم": trim["trim_slug"],
+            "سال": trim["year_label"],
+            "تعداد تریم مدل": str(trim["model_trim_count"]),
+            "تعداد بخش‌ها": str(trim["section_count"]),
+            "تعداد ویژگی‌ها": str(trim["item_count"]),
+            "امتیاز نهایی": _format_value(review.get("final_score")),
+            "رانندگی و فنی": _format_value(scores.get("رانندگی و فنی")),
+            "طراحی ظاهری": _format_value(scores.get("طراحی ظاهری")),
+            "کابین و امکانات": _format_value(scores.get("کابین و امکانات")),
+            "ارزش در مقابل قیمت": _format_value(scores.get("ارزش در مقابل قیمت")),
+            "کیفیت": _format_value(scores.get("کیفیت")),
+            "لینک صفحه": trim["url"],
+            "تاریخ استخراج": trim["scraped_at"],
+        }
+        for section, key, column in KEY_SPEC_COLUMNS:
+            row[column] = _spec_value(trim["specs"], section, key)
+        rows.append(row)
+    return rows
 
-        for section_title, items in specs.items():
+
+def build_detail_rows(trims: list[dict[str, Any]]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for trim in trims:
+        for section_title, items in trim["specs"].items():
             if not isinstance(items, dict):
                 continue
             for feature, value in items.items():
                 rows.append(
                     {
-                        "لینک صفحه": url,
-                        "برند": brand,
-                        "مدل (اسلاگ)": model_slug,
-                        "مدل (خوانا)": model_display,
-                        "تاریخ استخراج": scraped_at,
+                        "برند": trim["brand_slug"],
+                        "مدل": trim["title"] or trim["model_slug"],
+                        "شناسه مدل": trim["model_id"],
+                        "تریم": trim["trim_name"] or trim["trim_slug"] or "(بدون تریم)",
+                        "سال": trim["year_label"],
                         "بخش": str(section_title),
                         "ویژگی": str(feature),
                         "مقدار": _format_value(value),
+                        "لینک صفحه": trim["url"],
                     }
                 )
+    return rows
+
+
+def build_review_rows(trims: list[dict[str, Any]]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for trim in trims:
+        review = trim["review"]
+        scores = review.get("scores") if isinstance(review.get("scores"), dict) else {}
+        rows.append(
+            {
+                "برند": trim["brand_slug"],
+                "مدل": trim["title"] or trim["model_slug"],
+                "تریم": trim["trim_name"] or trim["trim_slug"] or "(بدون تریم)",
+                "امتیاز نهایی": _format_value(review.get("final_score")),
+                "رانندگی و فنی": _format_value(scores.get("رانندگی و فنی")),
+                "طراحی ظاهری": _format_value(scores.get("طراحی ظاهری")),
+                "کابین و امکانات": _format_value(scores.get("کابین و امکانات")),
+                "ارزش در مقابل قیمت": _format_value(scores.get("ارزش در مقابل قیمت")),
+                "کیفیت": _format_value(scores.get("کیفیت")),
+                "نقاط قوت": _format_value(review.get("strengths")),
+                "نقاط ضعف": _format_value(review.get("weaknesses")),
+                "لینک صفحه": trim["url"],
+            }
+        )
     return rows
 
 
@@ -139,9 +212,7 @@ def build_failure_rows(progress_path: Path) -> list[dict[str, str]]:
 
     rows: list[dict[str, str]] = []
     for url, entry in processed.items():
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("status") != "FAILED":
+        if not isinstance(entry, dict) or entry.get("status") != "FAILED":
             continue
         brand, model_slug, model_display = _parse_car_identity(str(url))
         rows.append(
@@ -171,34 +242,56 @@ def autofit_columns(worksheet: Any, *, max_width: int = MAX_COLUMN_WIDTH) -> Non
         worksheet.column_dimensions[get_column_letter(column_index)].width = width
 
 
+def _add_table(worksheet: Any, name: str) -> None:
+    if worksheet.max_row < 2 or worksheet.max_column < 1:
+        return
+    last_col = get_column_letter(worksheet.max_column)
+    ref = f"A1:{last_col}{worksheet.max_row}"
+    table = Table(displayName=name, ref=ref)
+    table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=True)
+    worksheet.add_table(table)
+
+
 def export_to_excel(
-    jsonl_path: Path,
+    json_path: Path,
     output_path: Path,
     progress_path: Path,
 ) -> Path:
-    records = load_jsonl_records(jsonl_path)
-    if not records:
-        raise ValueError(f"No records found in {jsonl_path}")
+    models, crawled_at = load_nested_models(json_path)
+    trims = flatten_trims(models, crawled_at)
+    if not trims:
+        raise ValueError(f"No trim records found in {json_path}")
 
-    summary_df = pd.DataFrame(build_summary_rows(records))
-    detail_df = pd.DataFrame(build_detail_rows(records))
+    summary_df = pd.DataFrame(build_summary_rows(trims))
+    detail_df = pd.DataFrame(build_detail_rows(trims))
+    review_df = pd.DataFrame(build_review_rows(trims))
     failures_df = pd.DataFrame(build_failure_rows(progress_path))
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        summary_df.to_excel(writer, sheet_name="خلاصه خودروها", index=False)
+        summary_df.to_excel(writer, sheet_name="خلاصه تریم‌ها", index=False)
         detail_df.to_excel(writer, sheet_name="مشخصات تفصیلی", index=False)
+        review_df.to_excel(writer, sheet_name="امتیاز و نظرات", index=False)
         if not failures_df.empty:
             failures_df.to_excel(writer, sheet_name="خطاهای استخراج", index=False)
 
-        for sheet_name in writer.sheets:
-            autofit_columns(writer.sheets[sheet_name])
+        table_names = {
+            "خلاصه تریم‌ها": "Trims",
+            "مشخصات تفصیلی": "Specs",
+            "امتیاز و نظرات": "Reviews",
+            "خطاهای استخراج": "Failures",
+        }
+        for sheet_name, worksheet in writer.sheets.items():
+            autofit_columns(worksheet)
+            worksheet.freeze_panes = "A2"
+            _add_table(worksheet, table_names.get(sheet_name, sheet_name))
 
     LOGGER.info(
-        "Exported %s → %s (cars=%d, detail_rows=%d, failures=%d)",
-        jsonl_path.name,
+        "Exported %s → %s (models=%d, trims=%d, detail_rows=%d, failures=%d)",
+        json_path.name,
         output_path.name,
+        len(models),
         len(summary_df),
         len(detail_df),
         len(failures_df),
@@ -207,8 +300,8 @@ def export_to_excel(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Export Bama scraped specs JSONL to Excel.")
-    parser.add_argument("--input", type=Path, default=DEFAULT_JSONL, help="Source JSONL file")
+    parser = argparse.ArgumentParser(description="Export Bama nested car specs JSON to Excel.")
+    parser.add_argument("--input", type=Path, default=DEFAULT_JSON, help="Source nested JSON file")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Output .xlsx path")
     parser.add_argument(
         "--progress-file",
@@ -229,12 +322,14 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         output = export_to_excel(args.input, args.output, args.progress_file)
-    except (FileNotFoundError, ValueError) as exc:
+    except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
         LOGGER.error("%s", exc)
         return 1
 
+    models, _ = load_nested_models(args.input)
+    trim_count = sum(len(m.get("trims") or []) for m in models)
     print(f"Excel آماده شد: {output.resolve()}")
-    print(f"تعداد خودرو: {len(load_jsonl_records(args.input))}")
+    print(f"مدل: {len(models)} | تریم: {trim_count}")
     return 0
 
 

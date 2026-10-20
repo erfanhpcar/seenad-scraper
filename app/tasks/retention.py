@@ -76,8 +76,9 @@ def _delete_older_than(
 @celery_app.task(name="tasks.purge_old_scraper_data")
 def purge_old_scraper_data() -> dict[str, Any]:
     """
-    Purge ``scraped_listings`` and ``car_zero_price_scrape_snapshot`` rows
-    older than ``DATA_RETENTION_DAYS`` (default 30).
+    Purge ``scraped_listings``, ``car_zero_price_scrape_snapshot``, and
+    ``iranjib_zero_price_scrape_snapshot`` rows older than ``DATA_RETENTION_DAYS``
+    (default 30).
     """
 
     retention_days = _env_int("DATA_RETENTION_DAYS", _DEFAULT_RETENTION_DAYS, minimum=1)
@@ -103,6 +104,12 @@ def purge_old_scraper_data() -> dict[str, Any]:
         cutoff=cutoff,
         batch_size=batch_size,
     )
+    iranjib_snapshots_deleted = _delete_older_than(
+        table="iranjib_zero_price_scrape_snapshot",
+        timestamp_column="created_at",
+        cutoff=cutoff,
+        batch_size=batch_size,
+    )
 
     payload: dict[str, Any] = {
         "success": True,
@@ -110,6 +117,7 @@ def purge_old_scraper_data() -> dict[str, Any]:
         "cutoff_utc": cutoff.isoformat(),
         "scraped_listings_deleted": listings_deleted,
         "car_zero_price_scrape_snapshot_deleted": snapshots_deleted,
+        "iranjib_zero_price_scrape_snapshot_deleted": iranjib_snapshots_deleted,
     }
     LOGGER.info("tasks.purge_old_scraper_data done %s", payload)
     return payload

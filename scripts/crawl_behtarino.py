@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """
-Two-phase crawler for Behtarino.com business directory (car dealers, repair shops).
+Two-phase crawler for Behtarino.com business directory (car dealers / نمایشگاه).
 
 Phase 1: Paginate /r/{category}/{city}?page=N; extract LocalBusiness rows from
           SearchResultsPage JSON-LD embedded in SSR HTML.
 Phase 2: Fetch each /p/{slug} detail page for phone numbers; append JSONL rows.
 
+Default is Tehran-only (historical). Behtarino's country-wide /r/{category} ranking
+is also Tehran-heavy. For Iran coverage use --all-cities and skip تهران.
+
 Usage:
   python scripts/crawl_behtarino.py
   python scripts/crawl_behtarino.py --limit-pages 2 --output data/raw_behtarino_dealers.jsonl -v
   python scripts/crawl_behtarino.py --resume --output data/raw_behtarino_dealers.jsonl
-  python scripts/crawl_behtarino.py --category تعمیرگاه-خودرو --city تهران
+  python scripts/crawl_behtarino.py --all-cities --skip-cities تهران --resume
+  python scripts/crawl_behtarino.py --city اصفهان
   python scripts/crawl_behtarino.py --no-city --category نمایشگاه-خودرو
 
 Dependencies (project requirements.txt):
@@ -30,7 +34,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, unquote, urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -43,6 +47,8 @@ BASE_URL = "https://behtarino.com"
 DEFAULT_CATEGORY = "نمایشگاه-خودرو"
 DEFAULT_CITY = "تهران"
 DEFAULT_OUTPUT = Path("data/raw_behtarino_dealers.jsonl")
+DEFAULT_CITIES_DONE = Path("data/behtarino_dealers_cities_done.txt")
+CITY_HREF_RE = re.compile(r'href="(/r/[^"]+)"')
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -102,6 +108,58 @@ def listing_page_url(base_url: str, page: int) -> str:
         return base_url
     separator = "&" if "?" in base_url else "?"
     return f"{base_url}{separator}page={page}"
+
+
+def discover_city_slugs(
+    session: requests.Session,
+    category: str,
+    *,
+    timeout: float = 30.0,
+) -> list[str]:
+    """Parse city links from the category landing page (/r/{category})."""
+    listing_url = build_listing_base_url(category, None)
+    response = session.get(listing_url, timeout=timeout)
+    response.encoding = "utf-8"
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"City discovery failed HTTP {response.status_code} for {listing_url}"
+        )
+    if _is_blocked_response(response.status_code, response.text):
+        raise RuntimeError(f"City discovery blocked on {listing_url}")
+
+    prefix = f"/r/{category}/"
+    cities: list[str] = []
+    seen: set[str] = set()
+    for href in CITY_HREF_RE.findall(response.text):
+        path = unquote(href.split("?", 1)[0]).rstrip("/")
+        if not path.startswith(prefix):
+            continue
+        city = path[len(prefix) :].strip().rstrip("\\")
+        if not city or "/" in city or city in seen:
+            continue
+        seen.add(city)
+        cities.append(city)
+
+    if not cities:
+        raise RuntimeError(f"No city links found on {listing_url}")
+    return cities
+
+
+def _load_done_cities(path: Path) -> set[str]:
+    if not path.is_file():
+        return set()
+    done: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        city = line.strip()
+        if city:
+            done.add(city)
+    return done
+
+
+def _mark_city_done(path: Path, city: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(city + "\n")
 
 
 def _optional_float(value: Any) -> float | None:
@@ -637,7 +695,10 @@ class BehtarinoCrawler:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Crawl Behtarino.com directory listings (JSON-LD + detail phones) into JSONL.",
+        description=(
+            "Crawl Behtarino.com dealer/showroom listings into JSONL. "
+            "Prefer --all-cities for Iran coverage (default city is Tehran)."
+        ),
     )
     parser.add_argument(
         "--category",
@@ -646,13 +707,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--city",
-        default=DEFAULT_CITY,
-        help=f"City slug (default: {DEFAULT_CITY}; use --no-city for country-wide)",
+        default=None,
+        help=f"City slug (default if omitted: {DEFAULT_CITY})",
     )
     parser.add_argument(
         "--no-city",
         action="store_true",
         help="Use /r/{category} without a city segment",
+    )
+    parser.add_argument(
+        "--all-cities",
+        action="store_true",
+        help="Discover and crawl every city linked from /r/{category}",
+    )
+    parser.add_argument(
+        "--skip-cities",
+        nargs="*",
+        default=[],
+        metavar="CITY",
+        help="City slugs to skip when using --all-cities (e.g. تهران)",
+    )
+    parser.add_argument(
+        "--cities-done-file",
+        type=Path,
+        default=DEFAULT_CITIES_DONE,
+        help=f"Checkpoint of completed cities (default: {DEFAULT_CITIES_DONE})",
     )
     parser.add_argument(
         "--limit-pages",
@@ -693,16 +772,49 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _resolve_city(args: argparse.Namespace) -> str | None:
+def _bootstrap_session() -> requests.Session:
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept-Encoding": "gzip, deflate",
+        }
+    )
+    return session
+
+
+def _resolve_cities(args: argparse.Namespace, session: requests.Session) -> list[str | None]:
+    selected = sum(bool(x) for x in (args.all_cities, args.no_city, args.city))
+    if selected > 1:
+        raise SystemExit("Use only one of --city, --all-cities, or --no-city")
+
+    if args.all_cities:
+        cities = discover_city_slugs(session, args.category, timeout=args.timeout)
+        skip = {c.strip() for c in args.skip_cities if isinstance(c, str) and c.strip()}
+        filtered = [c for c in cities if c not in skip]
+        LOGGER.info(
+            "Discovered %s cities; skipping %s (%s); crawling %s",
+            len(cities),
+            sorted(skip),
+            len(cities) - len(filtered),
+            len(filtered),
+        )
+        return filtered
+
     if args.no_city:
-        return None
-    city = args.city
-    if city is None:
-        return DEFAULT_CITY
-    stripped = str(city).strip()
-    if stripped.lower() in {"", "none", "null"}:
-        return None
-    return stripped
+        LOGGER.warning(
+            "Crawling country-wide /r/%s (Behtarino often returns Tehran-heavy results)",
+            args.category,
+        )
+        return [None]
+
+    if isinstance(args.city, str) and args.city.strip():
+        return [args.city.strip()]
+
+    LOGGER.info("No --city / --all-cities: defaulting to city=%s", DEFAULT_CITY)
+    return [DEFAULT_CITY]
 
 
 def main() -> int:
@@ -710,16 +822,64 @@ def main() -> int:
     args = parser.parse_args()
     _configure_logging(args.verbose)
 
-    crawler = BehtarinoCrawler(
-        category=args.category,
-        city=_resolve_city(args),
-        output_path=args.output,
-        limit_pages=args.limit_pages,
-        max_retries=args.max_retries,
-        timeout=args.timeout,
-        resume=args.resume,
-    )
-    return crawler.run()
+    try:
+        cities = _resolve_cities(args, _bootstrap_session())
+    except Exception as exc:
+        LOGGER.error("Failed to resolve cities: %s", exc)
+        return 1
+
+    if not cities:
+        LOGGER.error("No cities left to crawl after filters")
+        return 1
+
+    done_cities = _load_done_cities(args.cities_done_file) if args.all_cities else set()
+    if done_cities:
+        LOGGER.info(
+            "City checkpoint: %s already done in %s",
+            len(done_cities),
+            args.cities_done_file,
+        )
+
+    cities_run = 0
+    for index, city in enumerate(cities, start=1):
+        label = city or "(country-wide)"
+        if args.all_cities and city in done_cities:
+            LOGGER.info(
+                "[%s/%s] Skip city already completed: %s",
+                index,
+                len(cities),
+                label,
+            )
+            continue
+
+        LOGGER.info("[%s/%s] Starting city=%s", index, len(cities), label)
+        crawler = BehtarinoCrawler(
+            category=args.category,
+            city=city,
+            output_path=args.output,
+            limit_pages=args.limit_pages,
+            max_retries=args.max_retries,
+            timeout=args.timeout,
+            resume=True if args.all_cities else args.resume,
+        )
+        code = crawler.run()
+        cities_run += 1
+
+        if code == 0 and args.all_cities and city:
+            _mark_city_done(args.cities_done_file, city)
+            LOGGER.info("Marked city done: %s", city)
+        elif code != 0:
+            LOGGER.warning("City=%s finished with status=%s; continuing", label, code)
+
+    if args.all_cities:
+        LOGGER.info(
+            "All cities finished. cities_run=%s output=%s",
+            cities_run,
+            args.output.resolve(),
+        )
+        return 0 if cities_run > 0 else 1
+
+    return 0 if cities_run > 0 else 1
 
 
 if __name__ == "__main__":

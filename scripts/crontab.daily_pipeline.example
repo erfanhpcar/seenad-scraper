@@ -2,3 +2,10 @@
 # Adjust paths if your project path differs.
 30 2 * * * cd /var/www/seenad && /usr/bin/docker exec seenad_backend python scripts/run_daily_pipeline.py --provider divar >> /var/www/seenad/logs/cron_daily_pipeline.log 2>&1
 
+# Seenad 11:15 pickup window (Asia/Tehran): USD first, then sell-news. Finish by 11:10.
+# Afternoon sell-news refresh at 16:00 Tehran.
+# Prefer this host cron XOR Celery Beat (USD_IRR_RATE_BEAT_ENABLED + SELL_NEWS_BEAT_ENABLED), not both.
+# Afternoon USD refresh at 18:00 Tehran stays on Celery Beat (14:30 UTC) — do not remove it.
+CRON_TZ=Asia/Tehran
+0 11 * * * docker exec seenad_backend python3 scripts/run_seenad_1115_window.py >> /var/www/seenad-scraper/data/seenad_1115_window.log 2>&1
+0 16 * * * docker exec seenad_backend python3 scripts/crawl_sell_news.py >> /var/www/seenad-scraper/data/sell_news_cron.log 2>&1

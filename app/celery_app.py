@@ -27,6 +27,9 @@ celery_app.conf.update(
     task_track_started=True,
     task_time_limit=3600,
     task_soft_time_limit=3300,
+    task_routes={
+        "tasks.run_daily_zero_price_benchmark": {"queue": "scheduled_tasks"},
+    },
 )
 
 celery_app.autodiscover_tasks(["app.tasks"])
@@ -162,6 +165,39 @@ if _zero_price_beat_enabled:
         "schedule": crontab(hour=_zero_price_hours, minute=_zero_price_minute),
     }
 
+_iranjib_zero_price_beat_enabled = os.getenv("IRANJIB_ZERO_PRICE_BEAT_ENABLED", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
+if _iranjib_zero_price_beat_enabled:
+    # Twice daily Asia/Tehran, offset a few minutes after Bama:
+    #   10:05 → 06:35 UTC
+    #   16:05 → 12:35 UTC
+    # Override with IRANJIB_ZERO_PRICE_BEAT_HOURS_UTC and
+    # IRANJIB_ZERO_PRICE_BEAT_MINUTE_UTC.
+    try:
+        _iranjib_minute = int(os.getenv("IRANJIB_ZERO_PRICE_BEAT_MINUTE_UTC", "35"))
+    except ValueError:
+        _iranjib_minute = 35
+
+    _iranjib_hours_raw = os.getenv("IRANJIB_ZERO_PRICE_BEAT_HOURS_UTC", "").strip()
+    if not _iranjib_hours_raw:
+        _iranjib_hours_raw = "6,12"
+    try:
+        _iranjib_hours = tuple(
+            int(part.strip()) for part in _iranjib_hours_raw.split(",") if part.strip() != ""
+        )
+        if not _iranjib_hours:
+            raise ValueError("empty hours")
+    except ValueError:
+        _iranjib_hours = (6, 12)
+
+    _beat_schedule["iranjib-zero-price-twice-daily"] = {
+        "task": "tasks.iranjib_zero_price_scrape",
+        "schedule": crontab(hour=_iranjib_hours, minute=_iranjib_minute),
+    }
+
 _retention_beat_enabled = os.getenv("DATA_RETENTION_BEAT_ENABLED", "1").strip().lower() not in {
     "0",
     "false",
@@ -178,6 +214,104 @@ if _retention_beat_enabled:
     _beat_schedule["purge-old-scraper-data-nightly"] = {
         "task": "tasks.purge_old_scraper_data",
         "schedule": crontab(hour=_retention_hour, minute=_retention_minute),
+    }
+
+_usd_irr_rate_beat_enabled = os.getenv("USD_IRR_RATE_BEAT_ENABLED", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
+if _usd_irr_rate_beat_enabled:
+    # Free-market USD (TGJU price_dollar_rl) twice daily Asia/Tehran:
+    #   11:00 → 07:30 UTC  (Seenad reads usd_irr_rate + sell-news at 11:15)
+    #   18:00 → 14:30 UTC  (afternoon refresh of the same as_of_date row)
+    # Override with USD_IRR_RATE_BEAT_HOURS_UTC (comma-separated) and
+    # USD_IRR_RATE_BEAT_MINUTE_UTC. Legacy USD_IRR_RATE_BEAT_HOUR_UTC is merged
+    # with the 11:00 slot so 18:00 is never dropped by accident.
+    try:
+        _usd_irr_minute = int(os.getenv("USD_IRR_RATE_BEAT_MINUTE_UTC", "30"))
+    except ValueError:
+        _usd_irr_minute = 30
+
+    _usd_hours_raw = os.getenv("USD_IRR_RATE_BEAT_HOURS_UTC", "").strip()
+    if not _usd_hours_raw:
+        _usd_legacy_hour = os.getenv("USD_IRR_RATE_BEAT_HOUR_UTC", "").strip()
+        if _usd_legacy_hour:
+            _usd_hours_raw = f"7,{_usd_legacy_hour}"
+        else:
+            _usd_hours_raw = "7,14"
+    try:
+        _usd_irr_hours = tuple(
+            int(part.strip()) for part in _usd_hours_raw.split(",") if part.strip() != ""
+        )
+        if not _usd_irr_hours:
+            raise ValueError("empty hours")
+    except ValueError:
+        _usd_irr_hours = (7, 14)
+
+    _beat_schedule["usd-irr-rate-daily"] = {
+        "task": "tasks.usd_irr_rate_scrape",
+        "schedule": crontab(hour=_usd_irr_hours, minute=_usd_irr_minute),
+    }
+
+_sell_news_beat_enabled = os.getenv("SELL_NEWS_BEAT_ENABLED", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
+if _sell_news_beat_enabled:
+    # Sell-condition / بخشنامه crawl twice daily Asia/Tehran:
+    #   11:00 → 07:30 UTC  (must finish by 11:10 so Seenad can read at 11:15)
+    #   16:00 → 12:30 UTC  (afternoon refresh)
+    # Override with SELL_NEWS_BEAT_HOURS_UTC (comma-separated) and
+    # SELL_NEWS_BEAT_MINUTE_UTC. Legacy SELL_NEWS_BEAT_HOUR_UTC is merged
+    # with the 16:00 slot so the afternoon run is never dropped by accident.
+    try:
+        _sell_news_minute = int(os.getenv("SELL_NEWS_BEAT_MINUTE_UTC", "30"))
+    except ValueError:
+        _sell_news_minute = 30
+
+    _sell_news_hours_raw = os.getenv("SELL_NEWS_BEAT_HOURS_UTC", "").strip()
+    if not _sell_news_hours_raw:
+        _sell_news_legacy_hour = os.getenv("SELL_NEWS_BEAT_HOUR_UTC", "").strip()
+        if _sell_news_legacy_hour:
+            _sell_news_hours_raw = f"{_sell_news_legacy_hour},12"
+        else:
+            _sell_news_hours_raw = "7,12"
+    try:
+        _sell_news_hours = tuple(
+            int(part.strip()) for part in _sell_news_hours_raw.split(",") if part.strip() != ""
+        )
+        if not _sell_news_hours:
+            raise ValueError("empty hours")
+    except ValueError:
+        _sell_news_hours = (7, 12)
+
+    _beat_schedule["sell-news-daily"] = {
+        "task": "tasks.sell_news_scrape",
+        "schedule": crontab(hour=_sell_news_hours, minute=_sell_news_minute),
+    }
+
+_zero_benchmark_beat_enabled = os.getenv("ZERO_PRICE_BENCHMARK_BEAT_ENABLED", "0").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
+if _zero_benchmark_beat_enabled:
+    # Twice daily Asia/Tehran: 09:45 → 06:15 UTC, 15:45 → 12:15 UTC
+    try:
+        _zb_hours_raw = os.getenv("ZERO_PRICE_BENCHMARK_BEAT_HOURS_UTC", "6,12").strip()
+        _zb_minute = int(os.getenv("ZERO_PRICE_BENCHMARK_BEAT_MINUTE_UTC", "15"))
+        _zb_hours = tuple(int(p.strip()) for p in _zb_hours_raw.split(",") if p.strip())
+        if not _zb_hours:
+            raise ValueError("empty")
+    except ValueError:
+        _zb_hours = (6, 12)
+        _zb_minute = 15
+    _beat_schedule["run-zero-price-benchmark-0945-1545-tehran"] = {
+        "task": "tasks.run_daily_zero_price_benchmark",
+        "schedule": crontab(hour=_zb_hours, minute=_zb_minute),
+        "options": {"queue": "scheduled_tasks"},
     }
 
 if _beat_schedule:

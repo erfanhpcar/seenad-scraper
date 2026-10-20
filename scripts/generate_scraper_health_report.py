@@ -2,9 +2,9 @@
 """
 Scraper Server health dashboard: zero-price snapshots, raw listing volume, and network errors.
 
-Queries PostgreSQL (car_zero_price_scrape_snapshot, scraped_listings, optional pipeline/log
-tables) and optionally scans Celery worker container logs for HTTP/timeout failures in the
-last 24 hours.
+Queries PostgreSQL (car_zero_price_scrape_snapshot, iranjib_zero_price_scrape_snapshot,
+scraped_listings, optional pipeline/log tables) and optionally scans Celery worker
+container logs for HTTP/timeout failures in the last 24 hours.
 """
 
 from __future__ import annotations
@@ -69,6 +69,17 @@ class ZeroPriceBatchStat:
     created_at_utc: datetime
     raw_rows: int
     distinct_brands: int
+
+
+@dataclass(frozen=True)
+class IranJibBatchStat:
+    batch_id: str
+    created_at_utc: datetime
+    raw_rows: int
+    domestic_rows: int
+    imported_rows: int
+    rows_with_iid: int
+    rows_with_price: int
 
 
 @dataclass(frozen=True)
@@ -246,6 +257,67 @@ def _fetch_zero_price_batch_stats(session: Any, *, limit: int) -> list[ZeroPrice
             created_at_utc=row["batch_created_at"],
             raw_rows=int(row["raw_rows"]),
             distinct_brands=int(row["distinct_brands"]),
+        )
+        for row in rows
+    ]
+
+
+def _table_exists(session: Any, table_name: str) -> bool:
+    row = session.execute(
+        text(
+            """
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = 'public' AND table_name = :table_name
+            LIMIT 1
+            """
+        ),
+        {"table_name": table_name},
+    ).first()
+    return row is not None
+
+
+def _fetch_iranjib_zero_price_batch_stats(session: Any, *, limit: int) -> list[IranJibBatchStat]:
+    if not _table_exists(session, "iranjib_zero_price_scrape_snapshot"):
+        return []
+    query = text(
+        """
+        WITH ranked_batches AS (
+            SELECT
+                batch_id,
+                MIN(created_at) AS batch_created_at,
+                COUNT(*)::bigint AS raw_rows,
+                COUNT(*) FILTER (WHERE page_kind = 'domestic')::bigint AS domestic_rows,
+                COUNT(*) FILTER (WHERE page_kind = 'imported')::bigint AS imported_rows,
+                COUNT(iranjib_iid)::bigint AS rows_with_iid,
+                COUNT(market_price_toman)::bigint AS rows_with_price,
+                ROW_NUMBER() OVER (ORDER BY MIN(created_at) DESC) AS rn
+            FROM iranjib_zero_price_scrape_snapshot
+            GROUP BY batch_id
+        )
+        SELECT
+            batch_id,
+            batch_created_at,
+            raw_rows,
+            domestic_rows,
+            imported_rows,
+            rows_with_iid,
+            rows_with_price
+        FROM ranked_batches
+        WHERE rn <= :limit
+        ORDER BY batch_created_at DESC
+        """
+    )
+    rows = session.execute(query, {"limit": limit}).mappings().all()
+    return [
+        IranJibBatchStat(
+            batch_id=str(row["batch_id"]),
+            created_at_utc=row["batch_created_at"],
+            raw_rows=int(row["raw_rows"]),
+            domestic_rows=int(row["domestic_rows"]),
+            imported_rows=int(row["imported_rows"]),
+            rows_with_iid=int(row["rows_with_iid"]),
+            rows_with_price=int(row["rows_with_price"]),
         )
         for row in rows
     ]
@@ -611,6 +683,7 @@ def _render_report(
     *,
     tz: ZoneInfo,
     zero_price_batches: list[ZeroPriceBatchStat],
+    iranjib_batches: list[IranJibBatchStat],
     listings_ts_col: str,
     listing_stats: list[ListingDayProviderStat],
     parse_errors: list[ParseErrorStat],
@@ -650,6 +723,32 @@ def _render_report(
         for item in zero_price_batches
     ]
     lines.extend(_render_table(["batch_id", "created_at", "raw_rows", "distinct_brands"], zp_rows))
+
+    lines.extend(
+        [
+            "",
+            "_Latest batches in `iranjib_zero_price_scrape_snapshot` grouped by `batch_id`._",
+            "",
+        ]
+    )
+    ij_rows = [
+        [
+            item.batch_id,
+            _to_local_display(item.created_at_utc, tz),
+            _format_int(item.raw_rows),
+            _format_int(item.domestic_rows),
+            _format_int(item.imported_rows),
+            _format_int(item.rows_with_iid),
+            _format_int(item.rows_with_price),
+        ]
+        for item in iranjib_batches
+    ]
+    lines.extend(
+        _render_table(
+            ["batch_id", "created_at", "raw_rows", "domestic", "imported", "iid", "priced"],
+            ij_rows,
+        )
+    )
 
     lines.extend(
         [
@@ -783,6 +882,7 @@ def generate_report(
 
     with SessionLocal() as session:
         zp_stats = _fetch_zero_price_batch_stats(session, limit=zero_price_batches)
+        iranjib_stats = _fetch_iranjib_zero_price_batch_stats(session, limit=zero_price_batches)
         listings_ts_col, listing_stats = _fetch_listing_stats(session, listing_days=listing_days, tz=tz)
         parse_errors = _fetch_parse_error_stats(session, since_utc=since_utc)
         pipeline_table = _discover_pipeline_history_table(session)
@@ -801,6 +901,7 @@ def generate_report(
     return _render_report(
         tz=tz,
         zero_price_batches=zp_stats,
+        iranjib_batches=iranjib_stats,
         listings_ts_col=listings_ts_col,
         listing_stats=listing_stats,
         parse_errors=parse_errors,
