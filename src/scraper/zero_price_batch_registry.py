@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Final
 
-from sqlalchemy import delete, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -22,6 +22,10 @@ LOGGER: Final = logging.getLogger(__name__)
 STATUS_IN_PROGRESS: Final[str] = "in_progress"
 STATUS_COMPLETED: Final[str] = "completed"
 STATUS_FAILED: Final[str] = "failed"
+
+
+class ZeroPriceBatchInvalidCompletionError(ValueError):
+    """Raised when a batch cannot be marked completed (empty or not in progress)."""
 
 
 class ZeroPriceBatchSource(str, Enum):
@@ -45,6 +49,25 @@ def begin_zero_price_batch(db: Session, *, source: ZeroPriceBatchSource, batch_i
     db.execute(stmt)
 
 
+def count_snapshot_rows_for_batch(
+    db: Session,
+    *,
+    source: ZeroPriceBatchSource,
+    batch_id: str,
+) -> int:
+    snapshot_model = (
+        CarZeroPriceScrapeSnapshot
+        if source == ZeroPriceBatchSource.BAMA
+        else IranJibZeroPriceScrapeSnapshot
+    )
+    total = db.execute(
+        select(func.count())
+        .select_from(snapshot_model)
+        .where(snapshot_model.batch_id == batch_id)
+    ).scalar_one()
+    return int(total)
+
+
 def complete_zero_price_batch(
     db: Session,
     *,
@@ -52,12 +75,43 @@ def complete_zero_price_batch(
     batch_id: str,
     raw_row_count: int,
 ) -> None:
+    if raw_row_count <= 0:
+        raise ZeroPriceBatchInvalidCompletionError(
+            f"zero_price batch complete refused: raw_row_count={raw_row_count} batch_id={batch_id}"
+        )
+
+    batch_row = db.get(ZeroPriceScrapeBatch, batch_id)
+    if batch_row is None or batch_row.source != source.value:
+        raise ZeroPriceBatchInvalidCompletionError(
+            f"zero_price batch complete refused: missing registry row batch_id={batch_id}"
+        )
+    if batch_row.status != STATUS_IN_PROGRESS:
+        raise ZeroPriceBatchInvalidCompletionError(
+            f"zero_price batch complete refused: status={batch_row.status} batch_id={batch_id}"
+        )
+
+    persisted_rows = count_snapshot_rows_for_batch(db, source=source, batch_id=batch_id)
+    if persisted_rows <= 0:
+        raise ZeroPriceBatchInvalidCompletionError(
+            f"zero_price batch complete refused: no snapshot rows batch_id={batch_id}"
+        )
+    if persisted_rows != raw_row_count:
+        LOGGER.warning(
+            "zero_price batch row_count mismatch source=%s batch_id=%s counter=%s db=%s",
+            source.value,
+            batch_id,
+            raw_row_count,
+            persisted_rows,
+        )
+        raw_row_count = persisted_rows
+
     now = datetime.now(timezone.utc)
     db.execute(
         update(ZeroPriceScrapeBatch)
         .where(
             ZeroPriceScrapeBatch.batch_id == batch_id,
             ZeroPriceScrapeBatch.source == source.value,
+            ZeroPriceScrapeBatch.status == STATUS_IN_PROGRESS,
         )
         .values(
             status=STATUS_COMPLETED,

@@ -671,13 +671,14 @@ def run_iranjib_zero_price_pipeline(
                                 persist_batch,
                             )
                 db.commit()
-                complete_zero_price_batch(
-                    db,
-                    source=ZeroPriceBatchSource.IRANJIB,
-                    batch_id=persist_batch,
-                    raw_row_count=raw_rows_persisted,
-                )
-                db.commit()
+                if raw_rows_persisted > 0:
+                    complete_zero_price_batch(
+                        db,
+                        source=ZeroPriceBatchSource.IRANJIB,
+                        batch_id=persist_batch,
+                        raw_row_count=raw_rows_persisted,
+                    )
+                    db.commit()
             except Exception:
                 db.rollback()
                 LOGGER.exception("iranjib_price DB failure batch_id=%s", persist_batch)

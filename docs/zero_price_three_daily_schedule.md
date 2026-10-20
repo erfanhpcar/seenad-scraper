@@ -20,42 +20,56 @@ Environment (also set on `beat` in `docker-compose.yml`):
 Legacy twice-daily slots (10:00 / 16:00 Tehran) are **removed** from defaults; do not set
 `BAMA_ZERO_PRICE_BEAT_HOURS_UTC=6,12` in production unless intentionally rolling back.
 
-## Batch completion (`zero_price_scrape_batch`)
+## Batch completion — two-repo contract
+
+**Scraper (`seenad-scraper`)** writes snapshot rows and maintains **`zero_price_scrape_batch`**
+(migration `postgres/migrations/022_zero_price_scrape_batch.sql`). Table name, columns, and
+status values are stable; **seenad-main** must consume only batches that are explicitly
+`completed`.
 
 Snapshot tables (`car_zero_price_scrape_snapshot`, `iranjib_zero_price_scrape_snapshot`)
-commit incrementally every 400 rows. Without a completion marker, **seenad-main** could treat
-a partial `batch_id` as latest.
+commit incrementally every 400 rows during a crawl. The registry row is the only signal that
+a `batch_id` is safe to read.
 
-Migration: `postgres/migrations/022_zero_price_scrape_batch.sql`
+### Status lifecycle (scraper)
 
-| status        | Meaning |
-|---------------|---------|
-| `in_progress` | Crawl running; ignore snapshot rows for this `batch_id`. |
-| `completed`   | Full crawl; safe to consume. |
-| `failed`      | Aborted; snapshot rows for this `batch_id` are deleted. |
+| status        | Set by scraper when | seenad-main |
+|---------------|---------------------|-------------|
+| `in_progress` | Crawl started (`begin_zero_price_batch`) | **Do not consume** — includes worker hard-kill (row never updated). |
+| `completed`   | Crawl finished, **≥1** snapshot row persisted, counters validated | **Consume** — latest per `source` by `completed_at DESC`. |
+| `failed`      | Crawl error/empty run (`abort_zero_price_batch`) | **Do not consume** — snapshot rows for that `batch_id` are deleted. |
 
-### seenad-main rollout order
+Rules enforced in scraper pipelines:
 
-1. Apply `022_zero_price_scrape_batch.sql` on the scraper DB (no data backfill required).
-2. Deploy scraper with registry writes (this repo).
-3. Deploy seenad-main change: resolve latest batch via `zero_price_scrape_batch` where
-   `status = 'completed'` per `source`, ordered by `completed_at DESC`.
-4. Until step 3 ships, main may keep the old `MAX(created_at)` heuristic; new incomplete
-   batches are marked `in_progress`/`failed` and should not be selected once main filters
-   on `completed`.
+- `completed` is never written for an empty batch (`raw_row_count > 0` and DB row count check).
+- Partial commits during crawl stay `in_progress` until `complete_zero_price_batch` runs.
+- Celery retry uses a **new** `batch_id`; aborted runs are `failed` with snapshots removed.
 
-Example (Bama):
+### seenad-main consumption (required)
+
+Resolve the latest ingestible batch **only** from the registry:
 
 ```sql
-SELECT batch_id
+SELECT batch_id, completed_at, raw_row_count
 FROM zero_price_scrape_batch
-WHERE source = 'bama' AND status = 'completed'
+WHERE source = :source   -- 'bama' | 'iranjib'
+  AND status = 'completed'
 ORDER BY completed_at DESC
 LIMIT 1;
 ```
 
-Celery retries start a **new** `batch_id`; failed partial batches are cleaned up and marked
-`failed`.
+Then load snapshot rows for that `batch_id` from the matching snapshot table. Do **not** use
+`MAX(created_at)` on snapshot tables alone after scraper deploy.
+
+### Rollout order
+
+1. Apply `022_zero_price_scrape_batch.sql` on the scraper DB.
+2. Deploy scraper with registry lifecycle (this repo).
+3. Deploy seenad-main with the query above for both sources.
+4. Optional backfill: historical batches without registry rows remain invisible to main until
+   a new `completed` crawl exists (no automatic backfill).
+
+Integration tests: `tests/test_zero_price_batch_registry_postgres.py` (requires PostgreSQL).
 
 ## SB-01 benchmark beat
 

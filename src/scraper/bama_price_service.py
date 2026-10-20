@@ -507,13 +507,14 @@ def run_bama_zero_price_pipeline(
                             )
             if persist_batch:
                 db.commit()
-                complete_zero_price_batch(
-                    db,
-                    source=ZeroPriceBatchSource.BAMA,
-                    batch_id=persist_batch,
-                    raw_row_count=raw_rows_persisted,
-                )
-                db.commit()
+                if raw_rows_persisted > 0:
+                    complete_zero_price_batch(
+                        db,
+                        source=ZeroPriceBatchSource.BAMA,
+                        batch_id=persist_batch,
+                        raw_row_count=raw_rows_persisted,
+                    )
+                    db.commit()
         except (requests.RequestException, BamaHierarchyTransientError) as exc:
             errors_http += 1
             LOGGER.exception("bama_price HTTP failure: %s", exc)
