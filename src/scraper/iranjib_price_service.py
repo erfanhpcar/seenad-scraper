@@ -33,6 +33,13 @@ import requests
 from bs4 import BeautifulSoup, Tag
 from sqlalchemy.orm import Session
 
+from src.scraper.zero_price_batch_registry import (
+    ZeroPriceBatchSource,
+    abort_zero_price_batch,
+    begin_zero_price_batch,
+    complete_zero_price_batch,
+)
+
 LOGGER: Final = logging.getLogger(__name__)
 
 IRANJIB_BASE_URL: Final[str] = "https://www.iranjib.ir"
@@ -646,6 +653,12 @@ def run_iranjib_zero_price_pipeline(
 
         with SessionLocal() as db:
             try:
+                begin_zero_price_batch(
+                    db,
+                    source=ZeroPriceBatchSource.IRANJIB,
+                    batch_id=persist_batch,
+                )
+                db.commit()
                 for row in parsed_rows:
                     inserted = insert_scrape_snapshot_row(db, batch_id=persist_batch, row=row)
                     if inserted:
@@ -658,11 +671,32 @@ def run_iranjib_zero_price_pipeline(
                                 persist_batch,
                             )
                 db.commit()
+                complete_zero_price_batch(
+                    db,
+                    source=ZeroPriceBatchSource.IRANJIB,
+                    batch_id=persist_batch,
+                    raw_row_count=raw_rows_persisted,
+                )
+                db.commit()
             except Exception:
                 db.rollback()
                 LOGGER.exception("iranjib_price DB failure batch_id=%s", persist_batch)
+                with SessionLocal() as cleanup_db:
+                    abort_zero_price_batch(
+                        cleanup_db,
+                        source=ZeroPriceBatchSource.IRANJIB,
+                        batch_id=persist_batch,
+                    )
+                    cleanup_db.commit()
                 raise
         if raw_rows_persisted <= 0:
+            with SessionLocal() as cleanup_db:
+                abort_zero_price_batch(
+                    cleanup_db,
+                    source=ZeroPriceBatchSource.IRANJIB,
+                    batch_id=persist_batch,
+                )
+                cleanup_db.commit()
             raise IranJibTransientError(
                 f"iranjib_price empty snapshot batch_id={logical_batch} pages={pages_fetched}"
             )

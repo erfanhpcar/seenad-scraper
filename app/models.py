@@ -38,6 +38,29 @@ class UsdIrrRate(Base):
     )
 
 
+class ZeroPriceScrapeBatch(Base):
+    """Batch completion registry (022_zero_price_scrape_batch.sql)."""
+
+    __tablename__ = "zero_price_scrape_batch"
+
+    batch_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    raw_row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class CarZeroPriceScrapeSnapshot(Base):
     """One raw hierarchy row from Bama CAD API per batch (012_car_zero_price_scrape_snapshot.sql)."""
 

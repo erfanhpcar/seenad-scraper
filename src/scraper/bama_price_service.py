@@ -30,6 +30,12 @@ from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.models import CarZeroPriceScrapeSnapshot
+from src.scraper.zero_price_batch_registry import (
+    ZeroPriceBatchSource,
+    abort_zero_price_batch,
+    begin_zero_price_batch,
+    complete_zero_price_batch,
+)
 
 LOGGER: Final = logging.getLogger(__name__)
 
@@ -469,6 +475,13 @@ def run_bama_zero_price_pipeline(
     page_indexes: set[int] = set()
     with SessionLocal() as db:
         try:
+            if persist_batch:
+                begin_zero_price_batch(
+                    db,
+                    source=ZeroPriceBatchSource.BAMA,
+                    batch_id=persist_batch,
+                )
+                db.commit()
             for page_idx, item in iterate_hierarchy_items(
                 http,
                 page_size=page_size,
@@ -494,13 +507,46 @@ def run_bama_zero_price_pipeline(
                             )
             if persist_batch:
                 db.commit()
+                complete_zero_price_batch(
+                    db,
+                    source=ZeroPriceBatchSource.BAMA,
+                    batch_id=persist_batch,
+                    raw_row_count=raw_rows_persisted,
+                )
+                db.commit()
         except (requests.RequestException, BamaHierarchyTransientError) as exc:
             errors_http += 1
             LOGGER.exception("bama_price HTTP failure: %s", exc)
             db.rollback()
+            if persist_batch:
+                with SessionLocal() as cleanup_db:
+                    abort_zero_price_batch(
+                        cleanup_db,
+                        source=ZeroPriceBatchSource.BAMA,
+                        batch_id=persist_batch,
+                    )
+                    cleanup_db.commit()
+            raise
+        except Exception:
+            db.rollback()
+            if persist_batch:
+                with SessionLocal() as cleanup_db:
+                    abort_zero_price_batch(
+                        cleanup_db,
+                        source=ZeroPriceBatchSource.BAMA,
+                        batch_id=persist_batch,
+                    )
+                    cleanup_db.commit()
             raise
 
     if persist_batch and raw_rows_persisted <= 0:
+        with SessionLocal() as cleanup_db:
+            abort_zero_price_batch(
+                cleanup_db,
+                source=ZeroPriceBatchSource.BAMA,
+                batch_id=persist_batch,
+            )
+            cleanup_db.commit()
         raise BamaHierarchyTransientError(
             f"bama_price empty snapshot batch_id={logical_batch} pages={len(page_indexes)}"
         )
