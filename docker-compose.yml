@@ -133,7 +133,8 @@ services:
     working_dir: /app
     profiles:
       - benchmark
-    # Requires BENCHMARK_DATABASE_URL (export or secrets/benchmark_database_url before compose up)
+    # SB-01: deprecated scraper benchmark writer — do not enable in production.
+    # Requires BENCHMARK_DATABASE_URL and BENCHMARK_LEGACY_WRITER_COMPAT_VERIFIED=1 after schema audit.
     extra_hosts:
       - "bama.ir:185.166.104.4"
       - "www.bama.ir:185.166.104.4"
@@ -163,7 +164,7 @@ services:
       CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/0
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       PYTHONPATH: /app
-      BENCHMARK_ENABLED: "1"
+      BENCHMARK_ENABLED: "0"
     depends_on:
       redis:
         condition: service_healthy
@@ -225,7 +226,8 @@ services:
       IRANJIB_ZERO_PRICE_BEAT_ENABLED: "1"
       IRANJIB_ZERO_PRICE_BEAT_HOURS_UTC: "6,12"
       IRANJIB_ZERO_PRICE_BEAT_MINUTE_UTC: "35"
-      ZERO_PRICE_BENCHMARK_BEAT_ENABLED: "1"
+      # SB-01: legacy scraper benchmark beat off by default (seenad-main owns benchmark writes).
+      ZERO_PRICE_BENCHMARK_BEAT_ENABLED: "0"
       ZERO_PRICE_BENCHMARK_BEAT_HOURS_UTC: "6,12"
       ZERO_PRICE_BENCHMARK_BEAT_MINUTE_UTC: "15"
     depends_on:

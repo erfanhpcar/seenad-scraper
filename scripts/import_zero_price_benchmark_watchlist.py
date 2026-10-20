@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import create_engine, text
 
+from src.zero_price_benchmark.config import LegacyBenchmarkWriterDisabled, assert_legacy_benchmark_writer_may_run
+
 
 def _load_url() -> str:
     secret = Path("secrets/benchmark_database_url")
@@ -174,6 +176,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Deactivate benchmark_car rows not present in the file after import.",
     )
     args = parser.parse_args(argv)
+
+    try:
+        assert_legacy_benchmark_writer_may_run()
+    except LegacyBenchmarkWriterDisabled as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
 
     url = _load_url()
     if not url:

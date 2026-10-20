@@ -11,7 +11,7 @@ import requests
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from src.zero_price_benchmark.config import daily_limit
+from src.zero_price_benchmark.config import assert_legacy_benchmark_writer_may_run, daily_limit
 from src.zero_price_benchmark.hm_prices import fetch_price_from_catalog, load_catalog_index
 from src.zero_price_benchmark.k45_prices import fetch_estimated_price, _session as k45_session
 from src.zero_price_benchmark.seenad_prices import fetch_seenad_price
@@ -120,6 +120,7 @@ def _insert_observation(
 
 
 def run_daily_benchmark(session: Session) -> dict[str, Any]:
+    assert_legacy_benchmark_writer_may_run()
     limit = daily_limit()
     cars = _load_active_cars(session, limit)
     if not cars:

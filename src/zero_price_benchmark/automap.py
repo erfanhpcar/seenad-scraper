@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from src.zero_price_benchmark.config import assert_legacy_benchmark_writer_may_run
 from src.scraper.hamrah_mechanic_carprice_service import run_hamrah_carprice_pipeline
 from src.scraper.khodro45_pricing_service import flatten_dailycar_items, iter_dailycars_pages, _session as k45_session
 
@@ -67,6 +68,7 @@ def run_automap(session: Session, *, limit: int | None = None) -> dict[str, Any]
     or when a single HM row exists for the car's brand/model text (conservative).
     Full fuzzy automap lives in seenad-main; this helper refreshes HM/K45 payloads where possible.
     """
+    assert_legacy_benchmark_writer_may_run()
     cars = session.execute(
         text(
             """

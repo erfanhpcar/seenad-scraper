@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 # Zero-price benchmark: automap + full run against production Postgres.
+# SB-01: blocked unless legacy writer compatibility has been explicitly verified.
 set -euo pipefail
 cd /var/www/seenad-scraper
+
+if [[ "${BENCHMARK_LEGACY_WRITER_COMPAT_VERIFIED:-0}" != "1" ]]; then
+  echo "ERROR: SB-01 legacy benchmark writer is isolated. seenad-main owns benchmark writes." >&2
+  echo "Set BENCHMARK_LEGACY_WRITER_COMPAT_VERIFIED=1 only after main-app schema compatibility is verified." >&2
+  exit 1
+fi
 
 load_url() {
   if [[ -f secrets/benchmark_database_url ]]; then

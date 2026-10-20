@@ -298,6 +298,7 @@ _zero_benchmark_beat_enabled = os.getenv("ZERO_PRICE_BENCHMARK_BEAT_ENABLED", "0
     "no",
 }
 if _zero_benchmark_beat_enabled:
+    # Deprecated scraper-side writer (SB-01). Keep off in production compose; seenad-main owns writes.
     # Twice daily Asia/Tehran: 09:45 → 06:15 UTC, 15:45 → 12:15 UTC
     try:
         _zb_hours_raw = os.getenv("ZERO_PRICE_BENCHMARK_BEAT_HOURS_UTC", "6,12").strip()

@@ -12,12 +12,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.database import SessionLocal
 from src.zero_price_benchmark.automap import run_automap
+from src.zero_price_benchmark.config import LegacyBenchmarkWriterDisabled, assert_legacy_benchmark_writer_may_run
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=None, help="Max benchmark cars (smoke).")
     args = parser.parse_args(argv)
+
+    try:
+        assert_legacy_benchmark_writer_may_run()
+    except LegacyBenchmarkWriterDisabled as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
 
     with SessionLocal() as session:
         summary = run_automap(session, limit=args.limit)

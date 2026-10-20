@@ -4,6 +4,13 @@ from __future__ import annotations
 
 import os
 
+# SB-01: scraper-side benchmark DB writes are deprecated; seenad-main owns remediation.
+LEGACY_WRITER_COMPAT_ENV: str = "BENCHMARK_LEGACY_WRITER_COMPAT_VERIFIED"
+
+
+class LegacyBenchmarkWriterDisabled(RuntimeError):
+    """Scraper benchmark writer blocked until schema compatibility is explicitly verified."""
+
 
 def _flag(name: str, default: str = "0") -> bool:
     return os.getenv(name, default).strip().lower() not in {"0", "false", "no", ""}
@@ -11,6 +18,32 @@ def _flag(name: str, default: str = "0") -> bool:
 
 def benchmark_enabled() -> bool:
     return _flag("BENCHMARK_ENABLED", "0")
+
+
+def legacy_benchmark_writer_compat_verified() -> bool:
+    return _flag(LEGACY_WRITER_COMPAT_ENV, "0")
+
+
+def legacy_benchmark_writer_allowed() -> bool:
+    """True only when both runtime enable and post-migration compatibility opt-in are set."""
+    return benchmark_enabled() and legacy_benchmark_writer_compat_verified()
+
+
+def legacy_benchmark_writer_block_reason() -> str | None:
+    if not benchmark_enabled():
+        return "BENCHMARK_ENABLED=0"
+    if not legacy_benchmark_writer_compat_verified():
+        return (
+            f"{LEGACY_WRITER_COMPAT_ENV}=0 (SB-01: scraper legacy benchmark writer isolated; "
+            "seenad-main is the sole writer until schema compatibility is verified)"
+        )
+    return None
+
+
+def assert_legacy_benchmark_writer_may_run() -> None:
+    reason = legacy_benchmark_writer_block_reason()
+    if reason:
+        raise LegacyBenchmarkWriterDisabled(reason)
 
 
 def daily_limit() -> int | None:
