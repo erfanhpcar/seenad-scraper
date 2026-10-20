@@ -137,20 +137,21 @@ _zero_price_beat_enabled = os.getenv("BAMA_ZERO_PRICE_BEAT_ENABLED", "1").strip(
     "no",
 }
 if _zero_price_beat_enabled:
-    # Twice daily Asia/Tehran (Iran Standard Time, no DST):
-    #   10:00 → 06:30 UTC
-    #   16:00 → 12:30 UTC
+    # Thrice daily Asia/Tehran (Iran Standard Time, no DST), 15 min before calculator slots:
+    #   10:45 → 07:15 UTC
+    #   12:45 → 09:15 UTC
+    #   15:45 → 12:15 UTC
     # Override with BAMA_ZERO_PRICE_BEAT_HOURS_UTC (comma-separated) and
     # BAMA_ZERO_PRICE_BEAT_MINUTE_UTC. Legacy BAMA_ZERO_PRICE_BEAT_HOUR_UTC still works.
     try:
-        _zero_price_minute = int(os.getenv("BAMA_ZERO_PRICE_BEAT_MINUTE_UTC", "30"))
+        _zero_price_minute = int(os.getenv("BAMA_ZERO_PRICE_BEAT_MINUTE_UTC", "15"))
     except ValueError:
-        _zero_price_minute = 30
+        _zero_price_minute = 15
 
     _hours_raw = os.getenv("BAMA_ZERO_PRICE_BEAT_HOURS_UTC", "").strip()
     if not _hours_raw:
         _legacy_hour = os.getenv("BAMA_ZERO_PRICE_BEAT_HOUR_UTC", "").strip()
-        _hours_raw = _legacy_hour if _legacy_hour else "6,12"
+        _hours_raw = _legacy_hour if _legacy_hour else "7,9,12"
     try:
         _zero_price_hours = tuple(
             int(part.strip()) for part in _hours_raw.split(",") if part.strip() != ""
@@ -158,9 +159,9 @@ if _zero_price_beat_enabled:
         if not _zero_price_hours:
             raise ValueError("empty hours")
     except ValueError:
-        _zero_price_hours = (6, 12)
+        _zero_price_hours = (7, 9, 12)
 
-    _beat_schedule["bama-zero-price-twice-daily"] = {
+    _beat_schedule["bama-zero-price-thrice-daily-tehran"] = {
         "task": "tasks.bama_zero_price_scrape",
         "schedule": crontab(hour=_zero_price_hours, minute=_zero_price_minute),
     }
@@ -171,19 +172,20 @@ _iranjib_zero_price_beat_enabled = os.getenv("IRANJIB_ZERO_PRICE_BEAT_ENABLED", 
     "no",
 }
 if _iranjib_zero_price_beat_enabled:
-    # Twice daily Asia/Tehran, offset a few minutes after Bama:
-    #   10:05 → 06:35 UTC
-    #   16:05 → 12:35 UTC
+    # Thrice daily Asia/Tehran, five minutes after Bama in each slot:
+    #   10:50 → 07:20 UTC
+    #   12:50 → 09:20 UTC
+    #   15:50 → 12:20 UTC
     # Override with IRANJIB_ZERO_PRICE_BEAT_HOURS_UTC and
     # IRANJIB_ZERO_PRICE_BEAT_MINUTE_UTC.
     try:
-        _iranjib_minute = int(os.getenv("IRANJIB_ZERO_PRICE_BEAT_MINUTE_UTC", "35"))
+        _iranjib_minute = int(os.getenv("IRANJIB_ZERO_PRICE_BEAT_MINUTE_UTC", "20"))
     except ValueError:
-        _iranjib_minute = 35
+        _iranjib_minute = 20
 
     _iranjib_hours_raw = os.getenv("IRANJIB_ZERO_PRICE_BEAT_HOURS_UTC", "").strip()
     if not _iranjib_hours_raw:
-        _iranjib_hours_raw = "6,12"
+        _iranjib_hours_raw = "7,9,12"
     try:
         _iranjib_hours = tuple(
             int(part.strip()) for part in _iranjib_hours_raw.split(",") if part.strip() != ""
@@ -191,9 +193,9 @@ if _iranjib_zero_price_beat_enabled:
         if not _iranjib_hours:
             raise ValueError("empty hours")
     except ValueError:
-        _iranjib_hours = (6, 12)
+        _iranjib_hours = (7, 9, 12)
 
-    _beat_schedule["iranjib-zero-price-twice-daily"] = {
+    _beat_schedule["iranjib-zero-price-thrice-daily-tehran"] = {
         "task": "tasks.iranjib_zero_price_scrape",
         "schedule": crontab(hour=_iranjib_hours, minute=_iranjib_minute),
     }

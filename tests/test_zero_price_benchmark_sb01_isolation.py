@@ -83,8 +83,8 @@ def test_unrelated_beat_tasks_remain_when_benchmark_disabled(
         "hm-ingestion-queue-every-interval",
         "kn-ingestion-queue-every-interval",
         "listing-feeder-every-interval",
-        "bama-zero-price-twice-daily",
-        "iranjib-zero-price-twice-daily",
+        "bama-zero-price-thrice-daily-tehran",
+        "iranjib-zero-price-thrice-daily-tehran",
         "sell-news-daily",
     }
     assert expected.issubset(set(keys))
