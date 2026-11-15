@@ -11,7 +11,10 @@ from redis import Redis
 
 from app.celery_app import celery_app
 from src.scraper.ev_charging_live import (
-    extract_snapshot, notify_seenad, publish_snapshot, snapshot_path,
+    extract_snapshot,
+    notify_seenad,
+    publish_snapshot,
+    snapshot_path,
 )
 
 LOGGER = logging.getLogger(__name__)
