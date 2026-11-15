@@ -183,7 +183,10 @@ def extract_snapshot(session: requests.Session | None = None) -> dict:
                 "tariff": info.get("tariff"),
                 "currencyUnit": info.get("currencyUnit"),
                 "isFree": info.get("isFree"),
-                "reservableRaw": info.get("reservable") or charger.get("reservable"),
+                "reservableRaw": (
+                    info["reservable"] if info.get("reservable") is not None
+                    else charger.get("reservable")
+                ),
                 "workDays": info.get("workDays"),
                 "workHours": info.get("workHours"),
                 "facilities": info.get("facilities"),
