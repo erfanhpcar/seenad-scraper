@@ -54,7 +54,7 @@ The request has `X-Seenad-Timestamp` and `X-Seenad-Signature`. Signature is HMAC
 
 SeenAd callback does **not** accept a data payload or source URL. Its worker pulls the snapshot from the scraper's protected `GET /internal/ev-charging/snapshot`, Bearer-token authenticated, verifying the exact SHA256 before replacing the single current DB row. Never expose this route without TLS/IP firewall or via an untrusted redirect.
 
-If webhook delivery fails after publication, latest.json remains valid. Next successful hourly crawl notifies a new snapshot; alert on missing callbacks. No partial reversion.
+If webhook delivery fails after publication, latest.json remains valid and a bounded delayed Celery task retries webhook notification **without a fresh crawl**. A retry whose expected SHA is no longer current exits as `superseded`. The next successful hourly crawl also notifies a new snapshot. Alert on missing callbacks. No partial reversion.
 
 ### Environment (secrets must be placed only in server .env)
 
