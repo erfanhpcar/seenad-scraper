@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -12,7 +12,7 @@ from src.scraper import ev_charging_live as live
 def _snapshot():
     return {
         "schemaVersion": 1, "source": "emapna",
-        "fetchedAt": datetime.now(timezone.utc).isoformat(),
+        "fetchedAt": datetime.now(UTC).isoformat(),
         "counts": {"stations": 1, "devices": 1, "connectors": 2},
         "stations": [{
             "stationId": "st1", "name": "Station 1",
@@ -38,7 +38,7 @@ def test_atomic_latest_only_and_out_of_order_rejection(tmp_path, monkeypatch):
     with pytest.raises(live.CrawlRejected, match="out-of-order"):
         live.publish_snapshot(first)
     second = _snapshot()
-    second["fetchedAt"] = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+    second["fetchedAt"] = (datetime.now(UTC) + timedelta(minutes=1)).isoformat()
     second["stations"][0]["devices"][0]["connectors"][0]["statusCode"] = 2
     second["stations"][0]["devices"][0]["connectors"][0]["status"] = "Charging"
     live.publish_snapshot(second)
