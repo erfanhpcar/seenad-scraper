@@ -99,11 +99,34 @@ def test_real_shape_mapping_and_authoritative_detail_codes(monkeypatch):
     assert session.ids == ["dv1"]
 
 
-def test_403_is_not_retried_or_published(monkeypatch):
+@pytest.mark.parametrize("status", [401, 403, 429])
+def test_source_denial_is_not_retried_or_published(status):
     class Denied:
-        status_code = 403
+        status_code = status
+
     class DeniedSession:
+        def __init__(self):
+            self.calls = 0
+
         def post(self, url, json, timeout, allow_redirects):
+            self.calls += 1
             return Denied()
-    with pytest.raises(live.CrawlRejected, match="403"):
-        live.extract_snapshot(DeniedSession())
+
+    session = DeniedSession()
+    with pytest.raises(live.CrawlRejected, match=str(status)):
+        live.extract_snapshot(session)
+    assert session.calls == 1
+
+
+def test_missing_detail_never_yields_a_partial_snapshot(monkeypatch):
+    for name in ("STATIONS", "DEVICES", "CONNECTORS"):
+        monkeypatch.setenv("EV_CHARGING_MIN_" + name, "1")
+
+    class BrokenSession(FakeSession):
+        def post(self, url, json, timeout, allow_redirects):
+            if url.endswith("/getStation"):
+                return FakeResponse({"stationInfo": {"connectors": []}})
+            return super().post(url, json, timeout, allow_redirects)
+
+    with pytest.raises(live.CrawlRejected, match="missing detailed connectors"):
+        live.extract_snapshot(BrokenSession())
