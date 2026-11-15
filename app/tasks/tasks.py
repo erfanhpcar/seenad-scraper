@@ -11,3 +11,4 @@ import app.tasks.usd_irr_rate  # noqa: F401
 import app.tasks.sell_news  # noqa: F401
 import app.tasks.iranjib_zero_price  # noqa: F401
 import app.tasks.zero_price_benchmark  # noqa: F401
+import app.tasks.ev_charging  # noqa: F401
