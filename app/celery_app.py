@@ -30,6 +30,7 @@ celery_app.conf.update(
     task_routes={
         "tasks.run_daily_zero_price_benchmark": {"queue": "scheduled_tasks"},
         "tasks.ev_charging_hourly_crawl": {"queue": "ev_charging_tasks"},
+        "tasks.ev_charging_notify_latest": {"queue": "ev_charging_tasks"},
     },
 )
 
