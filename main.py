@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.database import Base, engine, get_db
 from app import models  # noqa: F401  # Ensure models are imported before create_all.
 from app.car_normalization import normalize_brand_model
+from app.routers.ev_charging_snapshot import router as ev_charging_snapshot_router
 from app.estimate_queries import (
     SQL_AVAILABLE_CARS_FROM_CLEAN,
     confidence_from_sample_size,
@@ -23,6 +24,7 @@ from app.estimate_queries import (
     scale_percentiles,
 )
 app = FastAPI(title="Seen Ad Backend", version="0.1.0")
+app.include_router(ev_charging_snapshot_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[

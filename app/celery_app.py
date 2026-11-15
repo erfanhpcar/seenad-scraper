@@ -29,6 +29,8 @@ celery_app.conf.update(
     task_soft_time_limit=3300,
     task_routes={
         "tasks.run_daily_zero_price_benchmark": {"queue": "scheduled_tasks"},
+        "tasks.ev_charging_hourly_crawl": {"queue": "ev_charging_tasks"},
+        "tasks.ev_charging_notify_latest": {"queue": "ev_charging_tasks"},
     },
 )
 
@@ -315,6 +317,16 @@ if _zero_benchmark_beat_enabled:
         "task": "tasks.run_daily_zero_price_benchmark",
         "schedule": crontab(hour=_zb_hours, minute=_zb_minute),
         "options": {"queue": "scheduled_tasks"},
+    }
+
+# :35 UTC is :05 at Asia/Tehran (UTC+03:30), once per hour.
+# Disabled until provider access and both server deployments pass QA.
+_ev_charging_enabled = os.getenv("EV_CHARGING_HOURLY_ENABLED", "0").strip().lower() in {"1", "true"}
+if _ev_charging_enabled:
+    _beat_schedule["ev-charging-full-snapshot-hourly"] = {
+        "task": "tasks.ev_charging_hourly_crawl",
+        "schedule": crontab(minute=35),
+        "options": {"queue": "ev_charging_tasks"},
     }
 
 if _beat_schedule:
