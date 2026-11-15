@@ -13,7 +13,7 @@ import os
 import re
 import time
 import unicodedata
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import requests
@@ -217,7 +217,7 @@ def extract_snapshot(session: requests.Session | None = None) -> dict:
         result = {
             "schemaVersion": 1,
             "source": "emapna",
-            "fetchedAt": datetime.now(timezone.utc).isoformat(),
+            "fetchedAt": datetime.now(UTC).isoformat(),
             "counts": counts,
             "stations": sorted_stations,
         }
