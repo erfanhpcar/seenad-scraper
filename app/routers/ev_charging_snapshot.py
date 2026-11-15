@@ -17,7 +17,8 @@ router = APIRouter()
 @router.get("/internal/ev-charging/snapshot")
 def get_latest_ev_charging_snapshot(authorization: str | None = Header(default=None)) -> Response:
     token = os.getenv("EV_CHARGING_SNAPSHOT_READ_TOKEN", "").strip()
-    incoming = (authorization or "").removeprefix("Bearer ").strip()
+    bearer = authorization or ""
+    incoming = bearer[len("Bearer "):].strip() if bearer.startswith("Bearer ") else ""
     if len(token) < 32 or not hmac.compare_digest(token, incoming):
         raise HTTPException(status_code=401, detail="Unauthorized")
     source = snapshot_path()
@@ -30,7 +31,7 @@ def get_latest_ev_charging_snapshot(authorization: str | None = Header(default=N
         payload = json.loads(raw)
     except ValueError as exc:
         raise HTTPException(status_code=503, detail="Invalid snapshot") from exc
-    if payload.get("schemaVersion") != 1 or payload.get("source") != "emapna":
+    if not isinstance(payload, dict) or payload.get("schemaVersion") != 1 or payload.get("source") != "emapna":
         raise HTTPException(status_code=503, detail="Invalid snapshot version")
     return Response(
         content=raw,
