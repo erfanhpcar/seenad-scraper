@@ -27,7 +27,7 @@ def _snapshot():
     }
 
 
-def test_atomic_latest_only_and_out_of_order_rejection(tmp_path, monkeypatch):
+def test_atomic_latest_only_and_out_of_order_rejection(tmp_path, monkeypatch, stub_ev_charging_db):
     destination = tmp_path / "latest.json"
     monkeypatch.setenv("EV_CHARGING_SNAPSHOT_PATH", str(destination))
     first = _snapshot()
@@ -35,8 +35,10 @@ def test_atomic_latest_only_and_out_of_order_rejection(tmp_path, monkeypatch):
     assert json.loads(destination.read_bytes()) == first
     assert len(digest) == 64 and raw == destination.read_bytes()
 
+    older = json.loads(json.dumps(first))
+    older["fetchedAt"] = (datetime.fromisoformat(first["fetchedAt"]) - timedelta(minutes=5)).isoformat()
     with pytest.raises(live.CrawlRejected, match="out-of-order"):
-        live.publish_snapshot(first)
+        live.publish_snapshot(older)
     second = _snapshot()
     second["fetchedAt"] = (datetime.now(UTC) + timedelta(minutes=1)).isoformat()
     second["stations"][0]["devices"][0]["connectors"][0]["statusCode"] = 2
@@ -46,7 +48,7 @@ def test_atomic_latest_only_and_out_of_order_rejection(tmp_path, monkeypatch):
     assert len(list(tmp_path.iterdir())) == 1
 
 
-def test_incomplete_or_duplicate_snapshot_never_replaces_latest(tmp_path, monkeypatch):
+def test_incomplete_or_duplicate_snapshot_never_replaces_latest(tmp_path, monkeypatch, stub_ev_charging_db):
     destination = tmp_path / "latest.json"
     monkeypatch.setenv("EV_CHARGING_SNAPSHOT_PATH", str(destination))
     live.publish_snapshot(_snapshot())

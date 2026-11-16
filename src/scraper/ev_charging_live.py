@@ -267,33 +267,62 @@ def snapshot_path() -> Path:
     return Path(os.getenv("EV_CHARGING_SNAPSHOT_PATH", "data/ev_charging/latest.json"))
 
 
-def publish_snapshot(snapshot: dict) -> tuple[str, bytes]:
-    """Atomic replacement: only latest valid snapshot, never a version archive."""
-    validate_snapshot(snapshot)
-    raw = json.dumps(snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    if len(raw) > _MAX_BYTES:
-        raise CrawlRejected("snapshot exceeds 8MB limit")
+def _mirror_legacy_snapshot_file(raw: bytes) -> None:
+    """Best-effort rollback-compatible file mirror after DB commit."""
     target = snapshot_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    # Compare floors with the previous complete snapshot; never truncate on
-    # mass source loss even if static configured minimum is passed.
-    if target.is_file():
-        previous = json.loads(target.read_text(encoding="utf-8"))
-        for kind in ("stations", "devices", "connectors"):
-            if snapshot["counts"][kind] < previous["counts"][kind] * 0.9:
-                raise CrawlRejected(f"{kind} declined >10%; retain previous snapshot")
-        old_time = datetime.fromisoformat(previous["fetchedAt"])
-        if datetime.fromisoformat(snapshot["fetchedAt"]) <= old_time:
-            raise CrawlRejected("out-of-order snapshot; previous is newer")
     staging = target.with_name(target.name + ".pending")
     try:
         staging.write_bytes(raw)
         os.replace(staging, target)
     finally:
         staging.unlink(missing_ok=True)
-    digest = hashlib.sha256(raw).hexdigest()
+
+
+def publish_snapshot(snapshot: dict) -> tuple[str, bytes]:
+    """Persist latest snapshot to PostgreSQL, then mirror legacy latest.json."""
+    from app.database import SessionLocal
+    from app.repositories.ev_charging_snapshot_repository import (
+        canonical_snapshot_bytes,
+        sha256_hex,
+        upsert_latest_snapshot,
+    )
+
+    validate_snapshot(snapshot)
+    raw = canonical_snapshot_bytes(snapshot)
+    digest = sha256_hex(raw)
+
+    session = SessionLocal()
+    try:
+        with session.begin():
+            upsert_latest_snapshot(session, snapshot, raw, digest)
+    except Exception:
+        rollback = getattr(session, "rollback", None)
+        if callable(rollback):
+            rollback()
+        raise
+    finally:
+        session.close()
+
+    try:
+        _mirror_legacy_snapshot_file(raw)
+    except OSError:
+        LOGGER.exception("ev_charging.legacy_file_mirror_failed after DB commit digest=%s", digest)
+
     LOGGER.info("ev_charging.snapshot_published digest=%s counts=%s", digest, snapshot["counts"])
     return digest, raw
+
+
+def load_published_snapshot_bytes() -> tuple[bytes, str] | None:
+    """Load canonical bytes from DB (source of truth)."""
+    from app.database import SessionLocal
+    from app.repositories.ev_charging_snapshot_repository import load_latest_snapshot_bytes
+
+    session = SessionLocal()
+    try:
+        return load_latest_snapshot_bytes(session)
+    finally:
+        session.close()
 
 
 def notify_seenad(snapshot: dict, digest: str) -> None:

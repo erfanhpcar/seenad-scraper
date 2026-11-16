@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, Integer, LargeBinary, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -115,6 +115,23 @@ class IranJibZeroPriceScrapeSnapshot(Base):
         server_default=func.now(),
         index=True,
     )
+
+
+class EvChargingLatestSnapshot(Base):
+    """Singleton latest EV charging snapshot (023_ev_charging_latest_snapshot.sql)."""
+
+    __tablename__ = "ev_charging_latest_snapshot"
+
+    source: Mapped[str] = mapped_column(String(32), primary_key=True)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    snapshot_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
 
 
 class ScrapedListing(Base):

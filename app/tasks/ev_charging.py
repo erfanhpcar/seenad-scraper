@@ -1,7 +1,6 @@
 """Hourly isolated charging crawler: publish one complete snapshot then notify SeenAd."""
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -12,9 +11,9 @@ from redis import Redis
 from app.celery_app import celery_app
 from src.scraper.ev_charging_live import (
     extract_snapshot,
+    load_published_snapshot_bytes,
     notify_seenad,
     publish_snapshot,
-    snapshot_path,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -66,12 +65,12 @@ def ev_charging_notify_latest(self, expected_sha256: str) -> dict:
     """Retry webhook delivery of ONLY the current complete file, never an old version."""
     if os.getenv("EV_CHARGING_HOURLY_ENABLED", "0").strip().lower() not in ("1", "true"):
         return {"status": "disabled"}
-    source = snapshot_path()
-    if not source.is_file():
+    loaded = load_published_snapshot_bytes()
+    if loaded is None:
         return {"status": "missing_snapshot"}
-    raw = source.read_bytes()
-    if hashlib.sha256(raw).hexdigest() != expected_sha256:
-        # Newer crawl replaced the single file. Its own webhook supersedes us.
+    raw, digest = loaded
+    if digest != expected_sha256:
+        # Newer crawl replaced the snapshot. Its own webhook supersedes us.
         return {"status": "superseded"}
     payload = json.loads(raw)
     try:
